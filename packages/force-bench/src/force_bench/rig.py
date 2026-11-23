@@ -769,6 +769,8 @@ class Rig:
             # (appendix_tasks.common.StopRun): the frames stepped so far are the episode
             if collection is not None and collection.writer.actions:
                 collection.finish(discard_pending=True)
+            elif collection is not None:
+                collection.abort()
         return self.rec
 
     def qa(self, paths) -> RolloutQA:
@@ -782,3 +784,4 @@ class Rig:
         report = json.load(open(self.out_dir / "rollout_qa.json"))
         print("QA PASS" if report["pass"] else "QA FAIL")
         return report
+

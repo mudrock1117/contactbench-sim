@@ -8,6 +8,7 @@ import pytest
 from force_bench.data import EpisodeWriter, discover_episodes, load_episode
 from force_bench.data.collect import qa_outcome
 from force_bench.data.collection import RigCollector, RigObservation, read_tactile
+from force_bench.data.rgb import FixedRGBCapture, rgb_config_from_env, validate_rgb_directory
 
 
 def metadata():
@@ -344,3 +345,95 @@ def test_collection_draws_a_random_start_per_episode_for_seeded_tasks():
     assert task_arguments(usb, 7)[-2:] == ["--seed", "7"] and task_arguments(usb, 7)[:-2] == list(usb.argv)
     assert task_arguments(usb, 7, random_start=False) == list(usb.argv)
     assert task_arguments(card, 7) == list(card.argv)          # a task without a random start keeps its own
+
+
+def test_rgb_config_is_opt_in_and_validates_enabled_values():
+    assert rgb_config_from_env({"TB_COLLECT_RGB": "0", "TB_COLLECT_RGB_FPS": "bad"}) == {
+        "enabled": False}
+    assert rgb_config_from_env({"TB_COLLECT_RGB": "1"}) == {
+        "enabled": True, "fps": 12, "width": 320, "height": 240}
+    with pytest.raises(ValueError, match="0 or 1"):
+        rgb_config_from_env({"TB_COLLECT_RGB": "yes"})
+    with pytest.raises(ValueError, match="positive"):
+        rgb_config_from_env({"TB_COLLECT_RGB": "1", "TB_COLLECT_RGB_WIDTH": "0"})
+
+
+def test_fixed_rgb_streams_reusable_buffer_at_simulation_timestamps(tmp_path):
+    class ReusableCamera:
+        instance = None
+
+        def __init__(self, model, pos, target, width, height, fov_deg):
+            self.buffer = np.zeros((height, width, 3), dtype=np.uint8)
+            self.count = 0
+            ReusableCamera.instance = self
+
+        def render(self, state):
+            self.buffer.fill(self.count)
+            self.count += 1
+            return self.buffer
+
+    rig = SimpleNamespace(model=object(), s0=object(), fps=60)
+    capture = FixedRGBCapture(
+        rig, tmp_path, "episode", {"position": [1, 2, 3], "target": [0, 0, 0],
+                                    "fov_deg": 37},
+        {"enabled": True, "fps": 12, "width": 8, "height": 6},
+        camera_factory=ReusableCamera)
+    for frame in range(1, 13):
+        capture.capture(rig.s0, frame / 60)
+    staging = capture.finish()
+    assert validate_rgb_directory(staging) == 3
+    np.testing.assert_allclose(np.load(staging / "timestamps.npy"), [0, 5 / 60, 10 / 60])
+    import imageio.v3 as iio
+    assert [int(iio.imread(staging / "images" / f"{i:06d}.png")[0, 0, 0])
+            for i in range(3)] == [0, 1, 2]
+    assert json.loads((staging / "camera.json").read_text())["mount"] == "fixed_world"
+
+
+def test_rgb_is_atomically_attached_and_checked_against_state_timebase(tmp_path):
+    class Camera:
+        def __init__(self, model, pos, target, width, height, fov_deg):
+            self.image = np.zeros((height, width, 3), dtype=np.uint8)
+
+        def render(self, state):
+            return self.image
+
+    rig = SimpleNamespace(model=object(), s0=object(), fps=60)
+    capture = FixedRGBCapture(
+        rig, tmp_path, "episode", {"position": [1, 0, 1], "target": [0, 0, 0]},
+        {"enabled": True, "fps": 12, "width": 4, "height": 3}, camera_factory=Camera)
+    capture.capture(rig.s0, 5 / 60)
+    w = writer(tmp_path, episode_id="episode")
+    w.metadata["rgb"] = capture.metadata
+    w.append([0, 0], [1, 1, 1], timestamp=5 / 60)
+    path = w.finish(attachments={"rgb/fixed": capture.finish()})
+    episode = load_episode(path)
+    assert episode.metadata["rgb"]["camera_type"] == "fixed_world"
+    assert not list(tmp_path.glob(".rgb-*"))
+    timestamps_path = path / "rgb" / "fixed" / "timestamps.npy"
+    np.save(timestamps_path, np.array([0.0, 0.05]))
+    import hashlib
+    manifest_path = path / "rgb" / "fixed" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files_sha256"]["timestamps.npy"] = hashlib.sha256(timestamps_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="aligned"):
+        load_episode(path)
+
+
+def test_aborted_rgb_staging_is_hidden_and_removed(tmp_path):
+    class Camera:
+        def __init__(self, model, pos, target, width, height, fov_deg):
+            self.image = np.zeros((height, width, 3), dtype=np.uint8)
+
+        def render(self, state):
+            return self.image
+
+    rig = SimpleNamespace(model=object(), s0=object(), fps=60)
+    capture = FixedRGBCapture(
+        rig, tmp_path, "aborted", {"position": [1, 0, 1], "target": [0, 0, 0]},
+        {"enabled": True, "fps": 12, "width": 4, "height": 3}, camera_factory=Camera)
+    assert capture.staging.name.startswith(".rgb-")
+    capture.abort()
+    assert not capture.staging.exists()
+    assert not discover_episodes(tmp_path)
+

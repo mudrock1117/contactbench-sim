@@ -155,7 +155,7 @@ class EpisodeWriter:
         for key, value in extras.items():
             self.extra.setdefault(key, []).append(value)
 
-    def finish(self, *, truncated=True, outcome=None):
+    def finish(self, *, truncated=True, outcome=None, attachments=None):
         if self._closed or not self.actions:
             raise ValueError("cannot publish an empty or already closed episode")
         self.truncated[-1] = bool(truncated and not self.terminated[-1])
@@ -187,6 +187,13 @@ class EpisodeWriter:
             data_path = temporary / "episode.npz"
             np.savez_compressed(data_path, **arrays)
             metadata["arrays_sha256"] = hashlib.sha256(data_path.read_bytes()).hexdigest()
+            for relative, source in (attachments or {}).items():
+                relative = Path(relative)
+                if relative.is_absolute() or ".." in relative.parts or relative.name.startswith("."):
+                    raise ValueError("attachment paths must be visible and relative")
+                destination_path = temporary / relative
+                destination_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(destination_path))
             atomic_json(temporary / "metadata.json", metadata)
             os.rename(temporary, destination)
         except BaseException:
@@ -206,6 +213,9 @@ def load_episode(path, *, verify_hash=True):
     with np.load(data_path, allow_pickle=False) as archive:
         arrays = {key: archive[key] for key in archive.files}
     validate_episode(arrays, metadata)
+    if "rgb" in metadata:
+        from .rgb import validate_rgb_episode
+        validate_rgb_episode(path, metadata, arrays["timestamps"])
     return Episode(path, metadata, arrays)
 
 
@@ -223,3 +233,4 @@ def discover_episodes(root, *, success_only=False):
             continue
         found.append(directory)
     return found
+

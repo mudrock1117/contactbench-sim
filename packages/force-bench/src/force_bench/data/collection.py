@@ -190,7 +190,8 @@ def provenance():
 
 
 class RigCollector:
-    def __init__(self, rig, output, *, task=None, seed=0, source="scripted_expert", tactile_size=16):
+    def __init__(self, rig, output, *, task=None, seed=0, source="scripted_expert", tactile_size=16,
+                 rgb_config=None):
         self.rig = rig
         self.observation = RigObservation(rig)
         self.has_tactile = bool(getattr(rig, "gel_sensors", {}))
@@ -217,6 +218,14 @@ class RigCollector:
             initial, validity = None, None
         self.writer = EpisodeWriter(output, metadata, self.observation.sample(), tactile=initial,
                                     tactile_valid=validity)
+        self.rgb = None
+        if rgb_config and rgb_config.get("enabled"):
+            from .rgb import FixedRGBCapture
+            camera = getattr(rig, "collection_camera", None)
+            if camera is None:
+                raise ValueError("RGB collection requires a fixed-world rig.collection_camera")
+            self.rgb = FixedRGBCapture(rig, output, self.writer.episode_id, camera, rgb_config)
+            self.writer.metadata["rgb"] = self.rgb.metadata
         self.pending = None
 
     def after_control(self):
@@ -235,6 +244,8 @@ class RigCollector:
         tactile, valid = read_tactile(self.rig, self.tactile_size) if self.has_tactile else (None, None)
         action, extra_cmd = self.pending
         extra = {**extra_cmd, **{k: np.asarray(v, dtype=np.float32) for k, v in (extra or {}).items()}}
+        if self.rgb is not None:
+            self.rgb.capture(self.rig.s0, timestamp)
         self.writer.append(action, self.observation.sample(), timestamp=timestamp, tactile=tactile,
                            tactile_valid=valid, extra=extra)
         self.pending = None
@@ -245,14 +256,26 @@ class RigCollector:
                 raise RuntimeError("cannot finish before the pending control is stepped")
             self.writer.metadata["discarded_incomplete_transition"] = True
             self.pending = None
-        path = self.writer.finish(truncated=True, outcome=outcome)
+        attachments = None
+        if self.rgb is not None:
+            rgb_staging = self.rgb.finish()
+            self.writer.metadata["rgb"]["num_frames"] = len(self.rgb.timestamps)
+            attachments = {f"rgb/{self.rgb.parameters['name']}": rgb_staging}
+        path = self.writer.finish(truncated=True, outcome=outcome, attachments=attachments)
         print(f"[collection] wrote {path} ({len(self.writer.actions)} transitions; QA pending)")
         return path
 
+    def abort(self):
+        if self.rgb is not None:
+            self.rgb.abort()
+
 
 def collector_from_env(rig):
+    from .rgb import rgb_config_from_env
     return RigCollector(rig, os.environ["TB_COLLECT_DIR"],
                         task=os.environ.get("TB_COLLECT_TASK", rig.name),
                         seed=int(os.environ.get("TB_COLLECT_SEED", "0")),
                         source=os.environ.get("TB_COLLECT_SOURCE", "scripted_expert"),
-                        tactile_size=int(os.environ.get("TB_COLLECT_TACTILE_SIZE", "16")))
+                        tactile_size=int(os.environ.get("TB_COLLECT_TACTILE_SIZE", "16")),
+                        rgb_config=rgb_config_from_env())
+

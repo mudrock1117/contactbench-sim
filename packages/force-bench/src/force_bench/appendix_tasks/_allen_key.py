@@ -775,6 +775,10 @@ def run(mode: str):
 
     cam_t, cam2_t = CAM_TGT.copy(), CAM2_TGT.copy()
     cam_p, cam2_p = cam_t + CAM_OFF, cam2_t + CAM2_OFF
+    # Dataset RGB uses the same task-authored external view as the rollout
+    # recorder.  It is a fixed world camera, never a wrist-mounted camera.
+    rig.collection_camera = {"position": cam_p.copy(), "target": cam_t.copy(),
+                             "fov_deg": float(CAM_FOV)}
     if os.environ.get("AK_PREVIEW"):
         # camera contact sheet from saved states, no physics (HP.preview_cameras)
         rig.finalize(probes=[], cam_pos=cam_p, cam_target=cam_t, record=False)
@@ -1689,3 +1693,4 @@ def verdict(rig, mode, name, paths, log, st, h, weight, q0):
                                         "appendix_tasks/_screwdriver_table.py",
                                  spec=SPEC[mode], criteria=crit, physics_qa=report,
                                  changes=changes)
+
