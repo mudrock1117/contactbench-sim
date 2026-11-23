@@ -154,13 +154,6 @@ def validate_rgb_directory(directory, parameters=None):
     expected = [f"{index:06d}.png" for index in range(len(timestamps))]
     if [path.name for path in files] != expected:
         raise ValueError("RGB image sequence does not match timestamps")
-    shape = (int(parameters["height"]), int(parameters["width"]), 3)
-    for path in files:
-        image = iio.imread(path)
-        if image.dtype != np.uint8 or image.shape != shape:
-            raise ValueError(f"invalid RGB image {path.name}")
-    if parameters.get("mount") != "fixed_world" or parameters.get("color_space") != "RGB":
-        raise ValueError("RGB camera must be recorded as fixed_world RGB")
     manifest = json.loads((directory / "manifest.json").read_text())
     expected_hashes = manifest.get("files_sha256", {})
     hashed_files = [directory / "timestamps.npy", directory / "camera.json", *files]
@@ -171,6 +164,13 @@ def validate_rgb_directory(directory, parameters=None):
         name = str(path.relative_to(directory)).replace("\\", "/")
         if hashlib.sha256(path.read_bytes()).hexdigest() != expected_hashes[name]:
             raise ValueError(f"RGB checksum mismatch: {name}")
+    shape = (int(parameters["height"]), int(parameters["width"]), 3)
+    for path in files:
+        image = iio.imread(path)
+        if image.dtype != np.uint8 or image.shape != shape:
+            raise ValueError(f"invalid RGB image {path.name}")
+    if parameters.get("mount") != "fixed_world" or parameters.get("color_space") != "RGB":
+        raise ValueError("RGB camera must be recorded as fixed_world RGB")
     return len(files)
 
 
