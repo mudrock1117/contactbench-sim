@@ -13,6 +13,10 @@ import numpy as np
 
 from force_bench.data.collection import RigCollector, RigObservation
 from force_bench.data.episode import atomic_json
+from force_bench.data.collection import read_tactile, tactile_metadata
+from force_bench.data.rgb import LiveRGBCamera
+from force_bench.data.task_language import task_instruction
+from force_bench.data.timebase import ActionChunkExecutor, PolicyTimeConfig
 from force_bench.robot.actions import (EndEffectorActionAdapter, EndEffectorActionConfig,
                                        JointPositionActionAdapter)
 
@@ -24,12 +28,31 @@ class PolicyEnvConfig:
     max_steps: int = 600
     terminate_on_action_failure: bool = True
     include_privileged_observation: bool = False
+    visual_mode: str = "none"
+    rgb_fps: float = 12.0
+    rgb_width: int = 320
+    rgb_height: int = 240
+    observation_horizon: int = 1
+    include_tactile: bool = False
+    tactile_hz: float = 12.0
+    tactile_size: int = 16
+    time_config: PolicyTimeConfig | None = None
 
     def __post_init__(self):
         if self.control_hz <= 0 or self.max_steps < 1:
             raise ValueError("control_hz and max_steps must be positive")
         if self.action_type not in ("joint_position", "eef_delta"):
             raise ValueError("action_type must be joint_position or eef_delta")
+        if self.visual_mode not in ("none", "fixed", "wrist", "both"):
+            raise ValueError("visual_mode must be none, fixed, wrist, or both")
+        if self.rgb_fps <= 0 or self.observation_horizon < 1:
+            raise ValueError("RGB frequency and observation_horizon must be positive")
+        if self.include_tactile and (self.tactile_hz <= 0 or self.tactile_size < 1):
+            raise ValueError("tactile frequency and size must be positive")
+        if self.time_config is not None and (
+                not np.isclose(self.control_hz, self.time_config.policy_hz) or
+                self.observation_horizon != self.time_config.observation_horizon):
+            raise ValueError("online control_hz/history must match PolicyTimeConfig")
 
 
 class ClosedLoopPolicyEnv:
@@ -60,6 +83,10 @@ class ClosedLoopPolicyEnv:
         self.steps = 0
         self.done = False
         self.last_error = None
+        self.rgb_cameras, self._history = {}, []
+        self.chunk_executor = ActionChunkExecutor()
+        self._tactile_next = 0
+        self._tactile_latest = None
 
     def reset(self):
         if self.collector is not None:
@@ -67,6 +94,9 @@ class ClosedLoopPolicyEnv:
                                      "source": "policy_reset", "reason": "environment reset"})
         self.scene = self.scene_factory()
         self.rig = self.scene.rig
+        if self.config.time_config is not None and not np.isclose(
+                self.rig.fps, self.config.time_config.physics_hz):
+            raise ValueError("Rig state rate must match PolicyTimeConfig.physics_hz")
         ratio = float(self.rig.fps) / self.config.control_hz
         self.frames_per_action = int(round(ratio))
         if self.frames_per_action < 1 or not np.isclose(ratio, self.frames_per_action):
@@ -85,17 +115,41 @@ class ClosedLoopPolicyEnv:
         self.action_adapter = (JointPositionActionAdapter(self.rig)
                                if self.config.action_type == "joint_position" else self.tcp_adapter)
         self.t, self.steps, self.done, self.last_error = 0.0, 0, False, None
+        self.rgb_cameras, self._history = {}, []
+        self.chunk_executor = ActionChunkExecutor()  # never cross an episode boundary
+        names = (["fixed", "wrist"] if self.config.visual_mode == "both"
+                 else ([] if self.config.visual_mode == "none" else [self.config.visual_mode]))
+        for name in names:
+            definition = getattr(self.rig, f"collection_{name}_camera", None)
+            if definition is None and name == "fixed":
+                definition = getattr(self.rig, "collection_camera", None)
+            if definition is None:
+                raise ValueError(f"scene does not define the {name} policy camera")
+            camera = LiveRGBCamera(self.rig, name, definition, fps=self.config.rgb_fps,
+                                   width=self.config.rgb_width, height=self.config.rgb_height)
+            camera.sample(self.rig.s0, 0.0, force=True)
+            self.rgb_cameras[name] = camera
+        self._tactile_next, self._tactile_latest = 0, None
+        if self.config.include_tactile:
+            self._sample_tactile(force=True)
         if self.collect_dir is not None:
+            rgb_config = ({"enabled": True, "cameras": names, "fps": self.config.rgb_fps,
+                           "width": self.config.rgb_width, "height": self.config.rgb_height}
+                          if names else None)
             self.collector = RigCollector(self.rig, self.collect_dir,
                                           task=self.scene_name or getattr(self.scene, "name", "policy"),
-                                          seed=self.seed, source="closed_loop_policy")
+                                          seed=self.seed, source="closed_loop_policy",
+                                          tactile_size=self.config.tactile_size,
+                                          rgb_config=rgb_config)
             self.collector.writer.metadata["policy_environment"] = {
                 "control_hz": self.config.control_hz,
                 "action_type": self.config.action_type,
                 "expert_replay": False,
                 "expert_replay_limitation": "scripted task callbacks and privileged auxiliary controls are not recorded actions",
             }
-        return self.observe()
+        observation = self.observe()
+        self._history = [observation]
+        return self._with_history(observation)
 
     def observe(self):
         if self.rig is None:
@@ -107,9 +161,50 @@ class ClosedLoopPolicyEnv:
                   "robot_joint_velocity": full[9:18].copy()}
         if self.tcp_adapter is not None:
             result["tcp_pose_world_xyzw"] = self.tcp_adapter.actual_tcp_pose()
+        if self.rgb_cameras:
+            streams = {name: camera.observe(self.t) for name, camera in self.rgb_cameras.items()}
+            if len(streams) == 1:
+                result.update(next(iter(streams.values())))
+            else:
+                result["cameras"] = streams
+                result.update({"rgb": {name: value["rgb"] for name, value in streams.items()},
+                               "rgb_timestamp": {name: value["rgb_timestamp"] for name, value in streams.items()},
+                               "rgb_valid": {name: value["rgb_valid"] for name, value in streams.items()},
+                               "rgb_age_s": {name: value["rgb_age_s"] for name, value in streams.items()},
+                               "camera_name": tuple(streams),
+                               "calibration": {name: value["calibration"] for name, value in streams.items()}})
+        if self.config.include_tactile and self._tactile_latest is not None:
+            tactile = {key: (value.copy() if isinstance(value, np.ndarray) else value)
+                       for key, value in self._tactile_latest.items()}
+            tactile["tactile_age_s"] = np.float64(self.t - tactile["tactile_timestamp"])
+            result.update(tactile)
+        result["language_instruction"] = task_instruction(
+            self.scene_name or getattr(self.scene, "name", "policy"))
         for name, sensor in self.sensors.items():
             result[name] = sensor(self.rig, self.t)
         return result
+
+    def _with_history(self, current):
+        if self.config.observation_horizon == 1:
+            return current
+        history = self._history[-self.config.observation_horizon:]
+        # At reset, left-pad with the initial causal observation only.
+        history = [history[0]] * (self.config.observation_horizon - len(history)) + history
+        result = dict(current)
+        result["history"] = history
+        return result
+
+    def _sample_tactile(self, *, force=False):
+        if not force and self.t + 1e-12 < self._tactile_next / self.config.tactile_hz:
+            return
+        tactile, valid = read_tactile(self.rig, self.config.tactile_size)
+        self._tactile_latest = {"tactile": tactile, "tactile_valid": valid,
+                                "tactile_timestamp": np.float64(self.t),
+                                "tactile_age_s": np.float64(0.0),
+                                "tactile_calibration": tactile_metadata(self.config.tactile_size)}
+        self._tactile_next += 1
+        while self._tactile_next / self.config.tactile_hz <= self.t + 1e-12:
+            self._tactile_next += 1
 
     def _physics_frame(self):
         frame_dt = 1.0 / float(self.rig.fps)
@@ -155,21 +250,35 @@ class ClosedLoopPolicyEnv:
                 if self.collector is not None:
                     self.collector.after_control()
                 self._physics_frame()
+                for camera in self.rgb_cameras.values():
+                    camera.sample(self.rig.s0, self.t)
+                if self.config.include_tactile:
+                    self._sample_tactile()
                 if self.collector is not None:
                     self.collector.after_step(self.t)
             self.steps += 1
             truncated = self.steps >= self.config.max_steps
-            self.done = truncated
+            evaluation = self._run_evaluator()
+            terminated = evaluation.get("success") is True
+            self.done = truncated or terminated
             observation = self.observe()
+            self._history.append(observation)
+            self._history = self._history[-self.config.observation_horizon:]
+            observation = self._with_history(observation)
             info = {"action_success": True, "action_clipped": result.clipped,
                     "joint_target": result.joint_target,
                     "command_timestamp": command_time, "effective_until": self.t,
-                    "truncated": truncated, "expert_replay_supported": False}
+                    "truncated": truncated, "expert_replay_supported": False,
+                    "evaluation": evaluation}
             if self.done:
-                self._finish_collection({"status": "unvalidated", "success": None,
-                                         "source": "policy_horizon",
-                                         "reason": "task QA has not been evaluated"})
-            return observation, 0.0, False, truncated, info
+                outcome = dict(evaluation)
+                if truncated and outcome.get("success") is None:
+                    outcome.update(status="timeout", source="policy_horizon",
+                                   reason=outcome.get("reason", "policy step limit reached"))
+                self._finish_collection(outcome)
+                if getattr(self, "episode_path", None) is not None:
+                    atomic_json(Path(self.episode_path) / "policy_evaluation.json", outcome)
+            return observation, float(terminated), terminated, truncated and not terminated, info
         except Exception as error:
             self.last_error, self.done = f"{type(error).__name__}: {error}", True
             if self.collector is not None:
@@ -180,19 +289,32 @@ class ClosedLoopPolicyEnv:
                 "command_timestamp": command_time, "effective_until": self.t,
                 "truncated": False, "expert_replay_supported": False}
 
+    def replan(self, actions):
+        """Replace any unexecuted policy chunk; actions are consumed once."""
+        if self.config.time_config is not None and len(actions) > self.config.time_config.action_horizon:
+            raise ValueError("predicted chunk exceeds PolicyTimeConfig.action_horizon")
+        self.chunk_executor.replan(actions)
+
+    def step_next(self):
+        """Execute exactly the next action from the current prediction chunk."""
+        return self.step(self.chunk_executor.pop())
+
     def evaluate(self):
         """Run an explicitly supplied task evaluator; never invent success."""
+        report = self._run_evaluator()
+        path = getattr(self, "episode_path", None)
+        if path is not None:
+            atomic_json(Path(path) / "policy_evaluation.json", report)
+        return report
+
+    def _run_evaluator(self):
         if self.evaluator is None:
-            report = {"status": "unvalidated", "success": None,
-                      "source": "unavailable",
-                      "reason": "no task-specific QA adapter supplied; expert QA callbacks are not generic"}
+            from .evaluation import allen_key_state_evaluation
+            report = allen_key_state_evaluation(self.scene, self.rig, self.t)
         else:
             report = dict(self.evaluator(self.scene, self.rig, self.t))
             if not isinstance(report.get("success"), (bool, type(None))):
                 raise ValueError("evaluator success must be bool or None")
-        path = getattr(self, "episode_path", None)
-        if path is not None:
-            atomic_json(Path(path) / "policy_evaluation.json", report)
         return report
 
     def _finish_collection(self, outcome):
@@ -209,4 +331,3 @@ class ClosedLoopPolicyEnv:
         if self.collector is not None:
             self._finish_collection({"status": "unvalidated", "success": None,
                                      "source": "policy_close", "reason": "environment closed"})
-

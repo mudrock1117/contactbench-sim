@@ -211,6 +211,9 @@ class RigCollector:
                                            "Nonzero robot velocity/feedforward commands require corresponding action support."],
                     "extra_action_fields": {"action_target_velocity": "robot joint target velocity rad/s (7), m/s (2)",
                                             "action_feedforward": "robot joint torque N m (7), force N (2)"}}
+        from .task_language import task_instruction
+        metadata["language_instruction"] = task_instruction(metadata["task"])
+        metadata["language_semantics"] = "task-only instruction; contains no state, phase, or outcome"
         if self.has_tactile:
             metadata["tactile"] = tactile_metadata(self.tactile_size)
             initial, validity = read_tactile(rig, self.tactile_size)
@@ -218,14 +221,28 @@ class RigCollector:
             initial, validity = None, None
         self.writer = EpisodeWriter(output, metadata, self.observation.sample(), tactile=initial,
                                     tactile_valid=validity)
-        self.rgb = None
+        self.rgb = {}
         if rgb_config and rgb_config.get("enabled"):
-            from .rgb import FixedRGBCapture
-            camera = getattr(rig, "collection_camera", None)
-            if camera is None:
-                raise ValueError("RGB collection requires a fixed-world rig.collection_camera")
-            self.rgb = FixedRGBCapture(rig, output, self.writer.episode_id, camera, rgb_config)
-            self.writer.metadata["rgb"] = self.rgb.metadata
+            from .rgb import FixedRGBCapture, WristRGBCapture
+            try:
+                for name in rgb_config.get("cameras", ["fixed"]):
+                    camera = getattr(rig, f"collection_{name}_camera", None)
+                    if camera is None:
+                        # Backward-compatible name used by the original fixed camera.
+                        camera = getattr(rig, "collection_camera", None) if name == "fixed" else None
+                    if camera is None:
+                        raise ValueError(f"RGB collection requires rig.collection_{name}_camera")
+                    cls = FixedRGBCapture if name == "fixed" else WristRGBCapture
+                    self.rgb[name] = cls(rig, output, self.writer.episode_id, camera, rgb_config)
+            except BaseException:
+                for capture in self.rgb.values():
+                    capture.abort()
+                raise
+            self.writer.metadata["rgb"] = {
+                "camera_names": list(self.rgb), "camera_type": "multi" if len(self.rgb) > 1
+                else next(iter(self.rgb.values())).parameters["mount"],
+                "fps": float(rgb_config["fps"]), "timebase": "simulation_seconds",
+                "cameras": {name: capture.metadata for name, capture in self.rgb.items()}}
         self.pending = None
 
     def after_control(self):
@@ -244,8 +261,8 @@ class RigCollector:
         tactile, valid = read_tactile(self.rig, self.tactile_size) if self.has_tactile else (None, None)
         action, extra_cmd = self.pending
         extra = {**extra_cmd, **{k: np.asarray(v, dtype=np.float32) for k, v in (extra or {}).items()}}
-        if self.rgb is not None:
-            self.rgb.capture(self.rig.s0, timestamp)
+        for capture in self.rgb.values():
+            capture.capture(self.rig.s0, timestamp)
         self.writer.append(action, self.observation.sample(), timestamp=timestamp, tactile=tactile,
                            tactile_valid=valid, extra=extra)
         self.pending = None
@@ -257,17 +274,25 @@ class RigCollector:
             self.writer.metadata["discarded_incomplete_transition"] = True
             self.pending = None
         attachments = None
-        if self.rgb is not None:
-            rgb_staging = self.rgb.finish()
-            self.writer.metadata["rgb"]["num_frames"] = len(self.rgb.timestamps)
-            attachments = {f"rgb/{self.rgb.parameters['name']}": rgb_staging}
+        if self.rgb:
+            attachments = {}
+            counts = {}
+            try:
+                for name, capture in self.rgb.items():
+                    attachments[f"rgb/{name}"] = capture.finish()
+                    counts[name] = len(capture.timestamps)
+            except BaseException:
+                for capture in self.rgb.values():
+                    capture.abort()
+                raise
+            self.writer.metadata["rgb"]["num_frames"] = counts
         path = self.writer.finish(truncated=True, outcome=outcome, attachments=attachments)
         print(f"[collection] wrote {path} ({len(self.writer.actions)} transitions; QA pending)")
         return path
 
     def abort(self):
-        if self.rgb is not None:
-            self.rgb.abort()
+        for capture in self.rgb.values():
+            capture.abort()
 
 
 def collector_from_env(rig):
@@ -278,4 +303,3 @@ def collector_from_env(rig):
                         source=os.environ.get("TB_COLLECT_SOURCE", "scripted_expert"),
                         tactile_size=int(os.environ.get("TB_COLLECT_TACTILE_SIZE", "16")),
                         rgb_config=rgb_config_from_env())
-

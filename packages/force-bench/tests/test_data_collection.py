@@ -352,6 +352,8 @@ def test_rgb_config_is_opt_in_and_validates_enabled_values():
         "enabled": False}
     assert rgb_config_from_env({"TB_COLLECT_RGB": "1"}) == {
         "enabled": True, "fps": 12, "width": 320, "height": 240}
+    assert rgb_config_from_env({"TB_COLLECT_RGB": "1", "TB_COLLECT_RGB_CAMERAS": "both"})["cameras"] == [
+        "fixed", "wrist"]
     with pytest.raises(ValueError, match="0 or 1"):
         rgb_config_from_env({"TB_COLLECT_RGB": "yes"})
     with pytest.raises(ValueError, match="positive"):
@@ -436,4 +438,3 @@ def test_aborted_rgb_staging_is_hidden_and_removed(tmp_path):
     capture.abort()
     assert not capture.staging.exists()
     assert not discover_episodes(tmp_path)
-

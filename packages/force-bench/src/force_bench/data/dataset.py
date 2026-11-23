@@ -8,29 +8,37 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 from pathlib import Path
 
 import imageio.v3 as iio
 import numpy as np
 
 from .episode import discover_episodes, load_episode
+from .task_language import task_instruction
+from .timebase import PolicyTimeConfig, causal_indices, policy_action_ticks, resample_joint_actions
 
 
 @dataclass(frozen=True)
 class WindowSpec:
     observation_horizon: int = 2
     action_horizon: int = 16
-    camera_name: str | None = "fixed"
+    camera_name: str | tuple[str, ...] | None = "fixed"
     rgb_alignment: str = "previous"
     include_tactile: bool = False
     include_privileged: bool = False
     rgb_channels_first: bool = True
+    policy_time_config: PolicyTimeConfig | None = None
 
     def __post_init__(self):
         if self.observation_horizon < 1 or self.action_horizon < 1:
             raise ValueError("window horizons must be positive")
         if self.rgb_alignment != "previous":
             raise ValueError("only causal 'previous' RGB alignment is supported")
+        if self.policy_time_config is not None and (
+                self.observation_horizon != self.policy_time_config.observation_horizon or
+                self.action_horizon != self.policy_time_config.action_horizon):
+            raise ValueError("WindowSpec horizons must match policy_time_config")
 
 
 def policy_observation_indices(metadata, *, include_privileged=False):
@@ -112,12 +120,20 @@ class EpisodeWindowDataset:
                 raise ValueError(f"{path}: observation field metadata is inconsistent")
             item = {"episode": episode, "observation_indices": obs_indices,
                     "observation_fields": fields}
-            if spec.camera_name is not None:
-                item.update(self._camera_index(path, episode.metadata, spec.camera_name))
+            names = (() if spec.camera_name is None else
+                     ((spec.camera_name,) if isinstance(spec.camera_name, str) else tuple(spec.camera_name)))
+            item["cameras"] = {name: self._camera_index(path, episode.metadata, name)
+                               for name in names}
             episode_index = len(self.episodes)
             self.episodes.append(item)
-            first = spec.observation_horizon - 1
-            last = len(episode["actions"]) - spec.action_horizon
+            if spec.policy_time_config is None:
+                first = spec.observation_horizon - 1
+                last = len(episode["actions"]) - spec.action_horizon
+            else:
+                item["policy_ticks"] = policy_action_ticks(
+                    episode["timestamps"], spec.policy_time_config)
+                first = spec.observation_horizon - 1
+                last = len(item["policy_ticks"]) - spec.action_horizon
             self.samples.extend((episode_index, anchor) for anchor in range(first, last + 1))
 
     @staticmethod
@@ -127,7 +143,8 @@ class EpisodeWindowDataset:
             return {"camera_dir": None, "rgb_timestamps": None}
         directory = Path(path) / "rgb" / camera_name
         return {"camera_dir": directory,
-                "rgb_timestamps": np.load(directory / "timestamps.npy", allow_pickle=False)}
+                "rgb_timestamps": np.load(directory / "timestamps.npy", allow_pickle=False),
+                "calibration": json.loads((directory / "camera.json").read_text())}
 
     def __len__(self):
         return len(self.samples)
@@ -150,15 +167,26 @@ class EpisodeWindowDataset:
         item = self.episodes[episode_index]
         episode = item["episode"]
         h, a = self.spec.observation_horizon, self.spec.action_horizon
-        obs_slice = slice(anchor - h + 1, anchor + 1)
-        act_slice = slice(anchor, anchor + a)
-        state_t = episode["timestamps"][obs_slice]
-        action_start = episode["timestamps"][anchor:anchor + a]
-        action_end = episode["timestamps"][anchor + 1:anchor + a + 1]
+        if self.spec.policy_time_config is None:
+            obs_indices = np.arange(anchor - h + 1, anchor + 1)
+            act_indices = np.arange(anchor, anchor + a)
+            state_t = episode["timestamps"][obs_indices]
+            action_start = episode["timestamps"][act_indices]
+            action_end = episode["timestamps"][act_indices + 1]
+            actions = episode["actions"][act_indices].copy()
+        else:
+            ticks = item["policy_ticks"]
+            state_t = ticks[anchor - h + 1:anchor + 1]
+            obs_indices = causal_indices(episode["timestamps"], state_t)
+            action_start = ticks[anchor:anchor + a]
+            action_end = action_start + self.spec.policy_time_config.policy_dt
+            actions, act_indices = resample_joint_actions(
+                episode["actions"], episode["timestamps"], action_start)
         sample = {
-            "proprio": episode["observations"][obs_slice][:, item["observation_indices"]].copy(),
+            "proprio": episode["observations"][obs_indices][:, item["observation_indices"]].copy(),
             "proprio_timestamps": state_t.copy(),
-            "actions": episode["actions"][act_slice].copy(),
+            "timestamp": state_t.copy(),
+            "actions": actions,
             "action_start_timestamps": action_start.copy(),
             "action_end_timestamps": action_end.copy(),
             "episode_id": episode.metadata["episode_id"],
@@ -166,8 +194,11 @@ class EpisodeWindowDataset:
             "seed": episode.metadata.get("seed"),
             "anchor_index": np.int64(anchor),
         }
-        camera_dir, rgb_t = item["camera_dir"], item["rgb_timestamps"]
-        if camera_dir is not None:
+        camera_samples = {}
+        for camera_name, camera_item in item["cameras"].items():
+            camera_dir, rgb_t = camera_item["camera_dir"], camera_item["rgb_timestamps"]
+            if camera_dir is None:
+                continue
             rgb_indices = np.searchsorted(rgb_t, state_t, side="right") - 1
             valid = rgb_indices >= 0
             safe = np.maximum(rgb_indices, 0)
@@ -175,16 +206,28 @@ class EpisodeWindowDataset:
             frames = np.stack(frames)
             if self.spec.rgb_channels_first:
                 frames = frames.transpose(0, 3, 1, 2)
-            sample.update(rgb=frames, rgb_valid=valid,
-                          rgb_indices=rgb_indices.astype(np.int64),
-                          rgb_timestamps=np.where(valid, rgb_t[safe], np.nan),
-                          rgb_age_s=np.where(valid, state_t - rgb_t[safe], np.nan))
+            calibration = dict(camera_item["calibration"])
+            calibration["policy_layout"] = "CHW" if self.spec.rgb_channels_first else "HWC"
+            camera_samples[camera_name] = dict(
+                rgb=frames, rgb_valid=valid, camera_name=camera_name,
+                calibration=calibration,
+                rgb_indices=rgb_indices.astype(np.int64),
+                rgb_timestamp=np.where(valid, rgb_t[safe], np.nan),
+                rgb_age_s=np.where(valid, state_t - rgb_t[safe], np.nan))
+        if len(camera_samples) == 1:
+            sample.update(next(iter(camera_samples.values())))
+            sample["rgb_timestamps"] = sample["rgb_timestamp"]  # A1 compatibility
+        elif camera_samples:
+            sample["cameras"] = camera_samples
+            for key in ("rgb", "rgb_valid", "rgb_timestamp", "rgb_age_s", "calibration"):
+                sample[key] = {name: values[key] for name, values in camera_samples.items()}
         if self.spec.include_tactile and "tactile" in episode.arrays:
-            sample["tactile"] = episode["tactile"][obs_slice].copy()
-            sample["tactile_valid"] = episode["tactile_valid"][obs_slice].copy()
+            sample["tactile"] = episode["tactile"][obs_indices].copy()
+            sample["tactile_valid"] = episode["tactile_valid"][obs_indices].copy()
+            sample["tactile_timestamp"] = episode["timestamps"][obs_indices].copy()
         language = episode.metadata.get("language_instruction")
-        if language is not None:
-            sample["language_instruction"] = str(language)
+        sample["language_instruction"] = str(
+            language if language is not None else task_instruction(episode.metadata.get("task")))
         return self._convert(sample)
 
     @property
@@ -198,8 +241,8 @@ class EpisodeWindowDataset:
                     "alignment": "latest image timestamp <= proprio timestamp; may repeat at 12 vs 60 Hz"},
             "actions": {"shape": [a, 9], "dtype": "float32",
                         "units": "joint position targets: 7 rad + 2 m",
-                        "time": "action[i] applies from action_start_timestamps[i] to action_end_timestamps[i]"},
-            "tactile": {"shape": [h, 2, "Ht", "Wt"], "dtype": "float32", "optional": True},
+                        "time": "action[i] is held on [start,end); policy_time_config resamples by timestamps"},
+            "tactile": {"shape": [h, 2, "Ht", "Wt"], "dtype": "float32", "units": "Pa",
+                        "semantics": "GelSight pressure raster, not tactile RGB", "optional": True},
             "language_instruction": {"shape": [], "dtype": "string", "optional": True},
         }
-

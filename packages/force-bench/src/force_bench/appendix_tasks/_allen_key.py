@@ -779,6 +779,15 @@ def run(mode: str):
     # recorder.  It is a fixed world camera, never a wrist-mounted camera.
     rig.collection_camera = {"position": cam_p.copy(), "target": cam_t.copy(),
                              "fov_deg": float(CAM_FOV)}
+    rig.collection_fixed_camera = rig.collection_camera
+    # Rigid link7 mount.  The view transform is evaluated from the actual
+    # simulated link pose each sampled frame, never from the IK command.
+    rig.collection_wrist_camera = {
+        "link_label": "fr3/fr3_link7",
+        "position_link": [0.045, 0.0, 0.035],
+        "target_link": [0.14, 0.0, -0.015],
+        "fov_deg": 60.0,
+    }
     if os.environ.get("AK_PREVIEW"):
         # camera contact sheet from saved states, no physics (HP.preview_cameras)
         rig.finalize(probes=[], cam_pos=cam_p, cam_target=cam_t, record=False)
@@ -817,6 +826,17 @@ def run(mode: str):
     thread = ThreadModel(rig.solver, model, j_z, j_scr, float(q0),
                          LOOSE_PRELOAD0 if mode == "loosen" else 0.0)
     rig.solver = thread
+    # State-only policy QA definition.  Thresholds are references to the
+    # existing constants; full success remains with verdict(), whose probe and
+    # torque evidence cannot be inferred from a final policy state.
+    rig.policy_qa_spec = {
+        "kind": "allen_key", "mode": mode,
+        "screw_q_index": q_scr, "screw_z_index": q_car,
+        "start_deg": float(np.degrees(q0)),
+        "turn_min_deg": float(TIGHT_TURN_MIN_DEG),
+        "loosen_min_deg": float(LOOSENED_MIN_DEG),
+        "lead_mm_per_rad": float(LEAD / MM),
+    }
 
     key_lbls = ["key_tip", "key_leg", "key_bend"]
     rig.probes["padL"] = HP.PairProbe(model, "fr3/fr3_leftfinger", key_lbls)
@@ -1693,4 +1713,3 @@ def verdict(rig, mode, name, paths, log, st, h, weight, q0):
                                         "appendix_tasks/_screwdriver_table.py",
                                  spec=SPEC[mode], criteria=crit, physics_qa=report,
                                  changes=changes)
-

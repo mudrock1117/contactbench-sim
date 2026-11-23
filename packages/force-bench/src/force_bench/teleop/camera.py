@@ -29,6 +29,24 @@ def _quat_to_mat(q):
     ])
 
 
+def _mat_to_quat(R):
+    """Rotation matrix to normalized xyzw quaternion."""
+    R = np.asarray(R, dtype=float)
+    q = np.empty(4, dtype=float)
+    t = np.trace(R)
+    if t > 0.0:
+        s = 2.0 * np.sqrt(t + 1.0)
+        q[:] = [(R[2, 1] - R[1, 2]) / s, (R[0, 2] - R[2, 0]) / s,
+                (R[1, 0] - R[0, 1]) / s, 0.25 * s]
+    else:
+        i = int(np.argmax(np.diag(R))); j, k = (i + 1) % 3, (i + 2) % 3
+        s = 2.0 * np.sqrt(max(1.0 + R[i, i] - R[j, j] - R[k, k], 0.0))
+        q[:] = 0.0; q[i] = 0.25 * s
+        q[j] = (R[j, i] + R[i, j]) / s; q[k] = (R[k, i] + R[i, k]) / s
+        q[3] = (R[k, j] - R[j, k]) / s
+    return q / np.linalg.norm(q)
+
+
 class TeleopCamera:
     def __init__(self, model: newton.Model, cam_pos, cam_target, width: int = 800,
                  height: int = 600, fov_deg: float = 40.0, supersample: int = 1):
@@ -103,6 +121,23 @@ class TeleopCamera:
     def look_at(self, pos, target):
         self.target = np.asarray(target, dtype=float).copy()
         self._set_from_pos(np.asarray(pos, dtype=float))
+
+    def set_transform(self, world_from_camera):
+        """Set an explicit world-from-camera pose, preserving wrist roll."""
+        T = np.asarray(world_from_camera, dtype=float)
+        if T.shape != (4, 4) or not np.isfinite(T).all():
+            raise ValueError("camera transform must be a finite 4x4 matrix")
+        q = _mat_to_quat(T[:3, :3])
+        pose = np.r_[T[:3, 3], q]
+        self.cam_tf = wp.array([[wp.transform(wp.vec3(*pose[:3]), wp.quat(*pose[3:]))]],
+                               dtype=wp.transformf)
+        self._p, self._R = T[:3, 3].copy(), T[:3, :3].copy()
+        self.target = self._p - self._R[:, 2] * self.dist
+
+    def transform(self) -> np.ndarray:
+        T = np.eye(4)
+        T[:3, :3], T[:3, 3] = self._R, self._p
+        return T
 
     def pose(self) -> dict:
         return {"pos": [round(float(v), 4) for v in self.pos],

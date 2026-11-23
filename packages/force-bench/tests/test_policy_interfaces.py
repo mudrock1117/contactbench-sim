@@ -251,3 +251,14 @@ def test_policy_env_invalid_action_terminates_without_physics_step():
     assert terminated and not truncated and obs["timestamp"] == 0
     assert not info["action_success"]
 
+
+def test_policy_env_repeated_reset_clears_time_history_and_action_chunk():
+    env = ClosedLoopPolicyEnv(scene_factory=_policy_scene,
+                              config=PolicyEnvConfig(control_hz=30, observation_horizon=2))
+    first = env.reset()
+    env.replan(np.ones((2, 9)))
+    env.step_next()
+    second = env.reset()
+    assert first["timestamp"] == second["timestamp"] == 0
+    assert len(second["history"]) == 2
+    assert env.chunk_executor.remaining == 0
