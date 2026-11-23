@@ -37,6 +37,47 @@ self-intersection, or undersampling than PNG corruption. The side offset
 addresses the first cause; actual scene rendering is still required to
 distinguish the remaining renderer artifacts.
 
+## A3.3 offline wrist-mount comparison
+
+`python -m force_bench.data.compare_wrist_mounts EPISODE OUTPUT.png` rebuilds
+the recorded task scene and restores exact rows from
+`artifacts/**/rollout_states.npz`. It refuses episodes without the complete
+`body_q/body_qd` artifact; the 18D policy proprioception and privileged
+nonrobot poses in `episode.npz` are not sufficient to reconstruct robot-link
+render state and are never interpolated. Scene task arguments and recorded
+physics environment variables are reapplied for topology compatibility.
+
+The default columns are the requested rigid TCP mounts A-D. Every column in a
+row is rendered from the same restored physical-state row. A valid Allen key
+`expert_log.npz` selects approach, contact, rotation, and exit phases; otherwise
+four uniformly spaced columns are explicitly labelled `time sample`. The PNG
+is accompanied by a JSON report containing timestamps, parameters, privileged
+offline projections of the recorded key tip and screw recess, image-bound
+checks, and center-ray shape/body IDs. These diagnostics are not added to an
+episode, dataset sample, or online policy observation, and they do not replace
+manual inspection of the rendered pixels.
+
+Custom candidates are supplied as a JSON object mapping names to
+`{"position": [x,y,z], "target": [x,y,z], "fov_deg": value}` in TCP units of
+metres/degrees. All transforms are computed once as
+`T_link7_tcp @ T_tcp_camera`; no per-frame object look-at is performed.
+
+Ubuntu example (rendering is intentionally an explicit user action):
+
+```bash
+python -m force_bench.data.compare_wrist_mounts \
+  outputs/datasets/allen_dual/EPISODE_ID \
+  outputs/wrist_mount_comparison.png
+```
+
+This writes `wrist_mount_comparison.png` and
+`wrist_mount_comparison.json`. If an older/moved episode lacks the state
+artifact, pass the original artifact explicitly with
+`--states /path/to/rollout_states.npz`. If no such artifact exists, exact
+offline rerendering is impossible: retain the episode unchanged and perform a
+new opt-in collection that publishes full states; do not synthesize link poses
+from 9D actions or 18D proprioception.
+
 `ClosedLoopPolicyEnv` accepts `visual_mode=none|fixed|wrist|both`, optional
 GelSight pressure rasters, an observation history, and a shared
 `PolicyTimeConfig`. `replan(chunk)` replaces the unused action tail and

@@ -10,6 +10,8 @@ from force_bench.data.task_language import task_instruction
 from force_bench.data.timebase import (ActionChunkExecutor, PolicyTimeConfig,
                                        causal_indices, policy_action_ticks,
                                        resample_joint_actions)
+from force_bench.data.compare_wrist_mounts import (DEFAULT_CANDIDATES, load_candidates,
+                                                    load_full_states)
 from force_bench.policy.evaluation import allen_key_state_evaluation
 
 
@@ -66,6 +68,35 @@ def test_wrist_mount_optical_minus_z_points_along_tcp_tool_axis():
 def test_camera_lookat_rejects_degenerate_up_axis():
     with pytest.raises(ValueError, match="parallel"):
         camera_lookat_matrix([0, 0, 0], [0, 0, 1], up=[0, 0, 1])
+
+
+def test_wrist_candidate_defaults_match_a3_3_specification():
+    candidates = load_candidates()
+    assert tuple(candidates) == ("A", "B", "C", "D")
+    np.testing.assert_allclose(candidates["A"]["position"], [0.055, 0, -0.035])
+    np.testing.assert_allclose(candidates["B"]["position"], [0.080, 0, -0.035])
+    np.testing.assert_allclose(candidates["C"]["target"], [0, 0, 0.140])
+    assert candidates["A"]["fov_deg"] == candidates["C"]["fov_deg"] == 72
+    assert candidates["D"]["fov_deg"] == 80
+    assert DEFAULT_CANDIDATES["D"]["target"] == [0.0, 0.0, 0.140]
+
+
+def test_full_state_loader_requires_exact_renderer_state_and_ignores_object_labels(tmp_path):
+    artifacts = tmp_path / "artifacts/task"
+    artifacts.mkdir(parents=True)
+    path = artifacts / "rollout_states.npz"
+    np.savez(path, t=np.array([0.1, 0.2]), body_q=np.zeros((2, 3, 7)),
+             body_qd=np.zeros((2, 3, 6)), body_labels=np.array(["a", "b", "c"], dtype=object))
+    loaded, times, body_q, body_qd = load_full_states(tmp_path)
+    assert loaded == path
+    np.testing.assert_array_equal(times, [0.1, 0.2])
+    assert body_q.shape == (2, 3, 7) and body_qd.shape == (2, 3, 6)
+
+
+def test_full_state_loader_refuses_episode_only_data_instead_of_interpolating(tmp_path):
+    (tmp_path / "artifacts").mkdir()
+    with pytest.raises(ValueError, match="full-state artifact"):
+        load_full_states(tmp_path)
 
 
 def test_policy_timebase_is_causal_and_resamples_60hz_actions_at_12hz():
