@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from force_bench.data.rgb import LiveRGBCamera
+from force_bench.data.rgb import (LiveRGBCamera, camera_lookat_matrix,
+                                  wrist_mount_from_tcp)
 from force_bench.data.task_language import task_instruction
 from force_bench.data.timebase import (ActionChunkExecutor, PolicyTimeConfig,
                                        causal_indices, policy_action_ticks,
@@ -49,6 +50,22 @@ def test_wrist_camera_uses_actual_link_pose_and_fixed_camera_does_not_move():
     assert wrist.observe(1 / 12)["rgb"].shape == (3, 3, 4)
     assert wrist.observe(1 / 12)["rgb"].dtype == np.uint8
     assert fixed.observe(1 / 12)["rgb_timestamp"] == wrist.observe(1 / 12)["rgb_timestamp"]
+
+
+def test_wrist_mount_optical_minus_z_points_along_tcp_tool_axis():
+    position = np.array([0.055, 0.0, -0.035])
+    target = np.array([0.0, 0.0, 0.110])
+    T = wrist_mount_from_tcp(np.eye(4), position, target, up_tcp=[0, 1, 0])
+    expected = (target - position) / np.linalg.norm(target - position)
+    np.testing.assert_allclose(-T[:3, 2], expected, atol=1e-12)
+    np.testing.assert_allclose(T[:3, 3], position)
+    np.testing.assert_allclose(T[:3, :3].T @ T[:3, :3], np.eye(3), atol=1e-12)
+    assert np.linalg.det(T[:3, :3]) == pytest.approx(1.0)
+
+
+def test_camera_lookat_rejects_degenerate_up_axis():
+    with pytest.raises(ValueError, match="parallel"):
+        camera_lookat_matrix([0, 0, 0], [0, 0, 1], up=[0, 0, 1])
 
 
 def test_policy_timebase_is_causal_and_resamples_60hz_actions_at_12hz():

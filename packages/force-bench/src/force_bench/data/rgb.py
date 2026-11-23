@@ -19,11 +19,58 @@ import numpy as np
 
 from force_bench.teleop.camera import TeleopCamera
 from force_bench.geometry import world_T
-from force_bench.recorder import lookat_transform
 
 from .episode import atomic_json
 
 CAMERA_NAME = "fixed"
+
+
+def _validate_rigid_transform(transform, name):
+    transform = np.asarray(transform, dtype=float)
+    if transform.shape != (4, 4) or not np.isfinite(transform).all():
+        raise ValueError(f"{name} must be a finite 4x4 transform")
+    if not np.allclose(transform[3], [0, 0, 0, 1], atol=1e-10):
+        raise ValueError(f"{name} must have homogeneous last row [0,0,0,1]")
+    rotation = transform[:3, :3]
+    if (not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-7)
+            or not np.isclose(np.linalg.det(rotation), 1.0, atol=1e-7)):
+        raise ValueError(f"{name} rotation must be right-handed and orthonormal")
+    return transform
+
+
+def camera_lookat_matrix(position, target, up=(0.0, 1.0, 0.0)):
+    """Return ``T_parent_camera`` for the renderer's camera convention.
+
+    Camera ``+X`` is image-right, ``+Y`` is image-up and optical forward is
+    ``-Z``.  ``position``, ``target`` and ``up`` are expressed in the same
+    parent frame.  This is a calibration helper only; it is never evaluated
+    against a task object during capture.
+    """
+    position, target, up = (np.asarray(value, dtype=float)
+                            for value in (position, target, up))
+    forward = target - position
+    if position.shape != (3,) or target.shape != (3,) or up.shape != (3,):
+        raise ValueError("look-at position, target, and up must have shape [3]")
+    if np.linalg.norm(forward) < 1e-9 or np.linalg.norm(up) < 1e-9:
+        raise ValueError("look-at direction and up vector must be nonzero")
+    forward /= np.linalg.norm(forward)
+    right = np.cross(forward, up)
+    if np.linalg.norm(right) < 1e-6:
+        raise ValueError("look-at up vector is parallel to the optical axis")
+    right /= np.linalg.norm(right)
+    image_up = np.cross(right, forward)
+    transform = np.eye(4)
+    transform[:3, :3] = np.column_stack((right, image_up, -forward))
+    transform[:3, 3] = position
+    return transform
+
+
+def wrist_mount_from_tcp(T_link_tcp, position_tcp, target_tcp, *, up_tcp=(0.0, 1.0, 0.0)):
+    """Build a rigid link-to-camera calibration via the FR3 TCP frame."""
+    T_link_tcp = _validate_rigid_transform(T_link_tcp, "T_link_tcp")
+    return _validate_rigid_transform(
+        T_link_tcp @ camera_lookat_matrix(position_tcp, target_tcp, up_tcp),
+        "T_link_camera")
 
 
 def _intrinsics(width, height, fov_deg):
@@ -31,10 +78,6 @@ def _intrinsics(width, height, fov_deg):
     return {"model": "pinhole", "fx": float(fy), "fy": float(fy),
             "cx": 0.5 * width, "cy": 0.5 * height,
             "vertical_fov_deg": float(fov_deg)}
-
-
-def _transform_of_pose(pose):
-    return world_T(np.asarray(pose, dtype=float))
 
 
 def _positive_int(environment, name, default):
@@ -190,11 +233,13 @@ class WristRGBCapture(FixedRGBCapture):
         if "T_link_camera" in camera:
             self.T_link_camera = np.asarray(camera["T_link_camera"], dtype=float)
         else:
-            tf = lookat_transform(np.asarray(camera.get("position_link", [0.04, 0.0, 0.04]), float),
-                                  np.asarray(camera.get("target_link", [0.12, 0.0, 0.0]), float))
-            self.T_link_camera = _transform_of_pose(tf)
+            self.T_link_camera = camera_lookat_matrix(
+                camera.get("position_link", [0.04, 0.0, 0.04]),
+                camera.get("target_link", [0.12, 0.0, 0.0]),
+                camera.get("up_link", [0.0, 0.0, 1.0]))
         if self.T_link_camera.shape != (4, 4):
             raise ValueError("T_link_camera must be 4x4")
+        self.T_link_camera = _validate_rigid_transform(self.T_link_camera, "T_link_camera")
         T_world_link = world_T(rig.s0.body_q.numpy()[self.link_index])
         T_world_camera = T_world_link @ self.T_link_camera
         initial = {"position": T_world_camera[:3, 3],
@@ -204,7 +249,12 @@ class WristRGBCapture(FixedRGBCapture):
                          camera_name="wrist")
         self.parameters.update({"mount": "wrist_link", "link_label": self.link_label,
                                 "T_link_camera": self.T_link_camera.tolist(),
-                                "transform_rule": "T_world_camera = T_world_link @ T_link_camera"})
+                                "transform_rule": "T_world_camera = T_world_link @ T_link_camera",
+                                **{key: (np.asarray(camera[key], dtype=float).tolist()
+                                         if key in ("position_tcp", "target_tcp", "up_tcp")
+                                         else camera[key])
+                                   for key in ("mount_frame", "position_tcp", "target_tcp",
+                                               "up_tcp", "optical_axis") if key in camera}})
         # Replace the look-at initial frame with the exact mount transform so
         # link roll is preserved from frame zero.
         for path in self.images.glob("*.png"):
@@ -246,11 +296,13 @@ class LiveRGBCamera:
             link_label = camera.get("link_label", "fr3/fr3_link7")
             self.link_index = list(rig.model.body_label).index(link_label)
             if "T_link_camera" in camera:
-                self.T_link_camera = np.asarray(camera["T_link_camera"], float)
+                self.T_link_camera = _validate_rigid_transform(
+                    camera["T_link_camera"], "T_link_camera")
             else:
-                pose = lookat_transform(np.asarray(camera.get("position_link", [0.04, 0, 0.04]), float),
-                                        np.asarray(camera.get("target_link", [0.12, 0, 0]), float))
-                self.T_link_camera = _transform_of_pose(pose)
+                self.T_link_camera = camera_lookat_matrix(
+                    camera.get("position_link", [0.04, 0, 0.04]),
+                    camera.get("target_link", [0.12, 0, 0]),
+                    camera.get("up_link", [0.0, 0.0, 1.0]))
             T = world_T(rig.s0.body_q.numpy()[self.link_index]) @ self.T_link_camera
             pos, target = T[:3, 3], T[:3, 3] - T[:3, 2]
             mount = "wrist_link"
@@ -264,6 +316,12 @@ class LiveRGBCamera:
                                                else self.T_link_camera.tolist()),
                             "transform_rule": ("constant T_world_camera" if name == "fixed" else
                                                "T_world_camera = T_world_link @ T_link_camera")}
+        if name == "wrist":
+            self.calibration.update({
+                key: (np.asarray(camera[key], dtype=float).tolist()
+                      if key in ("position_tcp", "target_tcp", "up_tcp") else camera[key])
+                for key in ("mount_frame", "position_tcp", "target_tcp", "up_tcp",
+                            "optical_axis") if key in camera})
         self._next_index, self.image, self.timestamp, self.pose = 0, None, None, None
 
     def _update_pose(self, state):

@@ -205,6 +205,7 @@ from force_bench.assets import make_newton_mesh, set_body_mass
 from force_bench.geometry import subdiv_processed as subdiv, world_T
 from force_bench.paths import ASSETS_ROOT
 from force_bench.recorder import RolloutRecorder
+from force_bench.data.rgb import wrist_mount_from_tcp
 from force_bench.rig import make_solver, set_finger_effort_limit
 from force_bench.robot.franka import down_grasp_quat
 from force_bench.tasks.screwdriver import DriveContacts
@@ -780,13 +781,30 @@ def run(mode: str):
     rig.collection_camera = {"position": cam_p.copy(), "target": cam_t.copy(),
                              "fov_deg": float(CAM_FOV)}
     rig.collection_fixed_camera = rig.collection_camera
-    # Rigid link7 mount.  The view transform is evaluated from the actual
-    # simulated link pose each sampled frame, never from the IK command.
+    # Rigid side mount expressed through the TCP frame.  FR3 TCP +z is the
+    # tool/finger approach direction; SensorTiledCamera looks along camera -z.
+    # Positioning the camera 55 mm to TCP +x keeps it outside the wrist/finger
+    # silhouette, while the fixed target 110 mm along +z frames the key tip,
+    # screw and block.  This look-at is evaluated ONCE to define
+    # T_link7_camera; runtime capture never looks at privileged task state.
+    wrist_position_tcp = np.array([
+        _env("AK_WRIST_CAM_PX", 0.055), _env("AK_WRIST_CAM_PY", 0.0),
+        _env("AK_WRIST_CAM_PZ", -0.035)])
+    wrist_target_tcp = np.array([
+        _env("AK_WRIST_CAM_TX", 0.0), _env("AK_WRIST_CAM_TY", 0.0),
+        _env("AK_WRIST_CAM_TZ", 0.110)])
+    wrist_up_tcp = np.array([0.0, 1.0, 0.0])
+    T_link_camera = wrist_mount_from_tcp(
+        T_off, wrist_position_tcp, wrist_target_tcp, up_tcp=wrist_up_tcp)
     rig.collection_wrist_camera = {
         "link_label": "fr3/fr3_link7",
-        "position_link": [0.045, 0.0, 0.035],
-        "target_link": [0.14, 0.0, -0.015],
-        "fov_deg": 60.0,
+        "T_link_camera": T_link_camera,
+        "mount_frame": "fr3/fr3_hand_tcp",
+        "position_tcp": wrist_position_tcp,
+        "target_tcp": wrist_target_tcp,
+        "up_tcp": wrist_up_tcp,
+        "optical_axis": "camera -Z points from position_tcp to target_tcp",
+        "fov_deg": _env("AK_WRIST_CAM_FOV", 72.0),
     }
     if os.environ.get("AK_PREVIEW"):
         # camera contact sheet from saved states, no physics (HP.preview_cameras)
