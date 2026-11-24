@@ -498,11 +498,14 @@ class GelSightRig(Rig):
             t_a = _time.perf_counter()
             try:
                 control_cb(t)
-            except BaseException:
+            except BaseException as error:
                 # Match Rig.run: a task's StopRun is a normal early terminal
                 # after the last complete transition, not a reason to lose a
                 # valid tactile episode. The pending action has no next state.
-                if collection is not None and collection.writer.actions:
+                normal_stop = (type(error).__name__ == "StopRun" and
+                               type(error).__module__ ==
+                               "force_bench.appendix_tasks.common")
+                if normal_stop and collection is not None and collection.writer.actions:
                     collection.finish(discard_pending=True)
                 elif collection is not None:
                     collection.abort()

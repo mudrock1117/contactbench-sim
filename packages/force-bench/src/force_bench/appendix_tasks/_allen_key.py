@@ -167,10 +167,12 @@ GELSIGHT: finger targets are the named constants F_TOUCH_DOF /
 F_CLOSE_DOF / F_OPEN_DOF / TIP_CLEAR / KEY_XP (add finger_offset() to the
 dof ones); the grip carries a force band (GRIP_BAND, admittance trim on the
 actual Gel normal force). The flat key occupies the last 3.5 mm of the
-fingertip, so the Allen-specific case mount extends by GS_TIP_EXTEND and
-raises the TCP by the same distance: the active Gel reaches the key while
-the case keeps the original table clearance. AK_GS_CASE_TIP_EXTEND_MM is
-an explicit diagnostic override; bare Gel mounts need no extension.
+fingertip, so the Allen-specific case mount extends by GS_TIP_EXTEND. The
+TCP is raised only enough to retain a finite 0.5 mm case/table clearance,
+putting the key deeper into the active Gel instead of leaving it on the
+relaxing edge. AK_GS_CASE_TIP_EXTEND_MM and
+AK_GS_CASE_TABLE_CLEAR_MM are diagnostic overrides; bare Gel mounts need
+no extension.
 
 MEASURED (draft runs of this module, TB_RENDER_FAST=1 -- identical physics;
 the publication runs' numbers are in outputs/appendix_tasks/<name>/
@@ -267,10 +269,16 @@ KEY_XP = 22.0 * MM             # pinch point along the long leg from the bend
 TIP_CLEAR = _env("AK_TIP_CLEAR", 1.5 * MM)
 GS_TIP_EXTEND = _env(
     "AK_GS_CASE_TIP_EXTEND_MM", GS.case_tip_align_extension() / MM) * MM
+# The extended case must not keep the original 1.5 mm clearance: doing so
+# leaves the key at the shallow Gel edge where it is squeezed out as the gel
+# relaxes. Keep a finite 0.5 mm case/table gap and spend the remaining 1 mm on
+# deeper pad overlap. Bare pads have no case extension and keep the old pose.
+GS_CASE_TABLE_CLEAR = _env("AK_GS_CASE_TABLE_CLEAR_MM", 0.5) * MM if GS.GS_ON else TIP_CLEAR
+GS_TCP_PICK_RAISE = max(0.0, GS_TIP_EXTEND - (TIP_CLEAR - GS_CASE_TABLE_CLEAR))
 # fingertips above the table at the pick (the suite's 1.5 mm).  The pads then
 # cover 3.5 of the leg's 5 mm side faces; the gripped stretch is an analytic
 # box (see build_scene for why a mesh there pushed the key out of the pinch).
-TCP_H = TIP_BELOW_TCP + TIP_CLEAR - KEY_HALF + GS_TIP_EXTEND
+TCP_H = TIP_BELOW_TCP + TIP_CLEAR - KEY_HALF + GS_TCP_PICK_RAISE
 SQUEEZE = _env("AK_SQUEEZE", 1.5 * MM)          # ~9-10 N/pad realised at 8 kN/m
 # (1.0 mm / ~6 N in the first draft: over seven strokes the drive torque kept
 # the pinch slipping in roll and the 1-3 N press crept the key 6.3 mm up
@@ -284,6 +292,10 @@ F_OPEN_DOF = F_TOUCH_DOF + OPEN_EXTRA
 GRIP_BAND = (7.0, 14.0)        # N, mean pad force: the admittance trim only acts
 GRIP_TRIM_STEP = 0.005 * MM    # outside it (m per frame) ...
 GRIP_TRIM_MAX = 1.0 * MM       # ... within +-1 mm of F_CLOSE_DOF
+GS_PICK_GRIP_BAND = (0.8, 2.5) # soft-gel pick/hold/lift; later phases use GRIP_BAND
+GS_HOLD_STABLE_S = 0.20
+GS_HOLD_MAX_S = 1.50
+GS_LIFT_LOST_FORCE_N = 0.5
 IMPRATIO = 10.0                # small-part pinch (plug_in_usb / hang_* lesson)
 # pad fingertip collision box in the finger frame (FR3 URDF shape 47 / 53)
 PAD_BOX_C = np.array([0.0, 7.58, 45.25]) * MM
@@ -378,6 +390,10 @@ HELD = ("hold", "lift", "lifthold", "carry", "tilt", "hover", "align", "insert",
         "unwind", "liftout", "back", "reinsert", "seat_hold", "extract", "up", "untilt",
         "carryback", "lower")
 T_PLACE_MAX = 4.0
+
+
+class _GraspFailure(RuntimeError):
+    """Diagnostic terminal: no stable physical grasp was established."""
 
 
 # ── small rotation helpers ──────────────────────────────────────────────
@@ -940,7 +956,8 @@ def run(mode: str):
               released=(mode == "tighten"), done_turning=False, final=False,
               probe=0.0, from_p=None, from_R=None, psi_end=None, place_z=None,
               ins_depth=[], G_log=[], strokes=[], unwinds=[], turn_sub="run", t_sub=0.0,
-              psi_seat=None, tau_pk=0.0, unw_ok=0)
+              psi_seat=None, tau_pk=0.0, unw_ok=0,
+              grip_stable_frames=0, grip_lost_frames=0, grasp_ref=None)
     key_com_z0 = float((key_T(rig.s0.body_q.numpy())[:3, :3] @
                         h["key_raw"].center_mass + key_T(rig.s0.body_q.numpy())[:3, 3])[2])
     order = ORDER
@@ -973,6 +990,8 @@ def run(mode: str):
         return {"mode": "grasp_check", "complete_task_qa": False,
                 "gelsight": bool(GS.GS_ON),
                 "case_tip_extend_m": float(GS_TIP_EXTEND),
+                "tcp_pick_raise_m": float(GS_TCP_PICK_RAISE),
+                "case_table_clearance_m": float(GS_CASE_TABLE_CLEAR),
                 "T_world_tcp": Tt.tolist(),
                 "T_world_tool": TK.tolist(),
                 "T_tcp_tool": (np.linalg.inv(Tt) @ TK).tolist(),
@@ -984,6 +1003,42 @@ def run(mode: str):
                 "tool_lift_m": lift, "tool_linear_speed_m_s": linear_speed,
                 "stable_hold": bool(lift > 0.050 and min(forces) > 0.5
                                     and linear_speed < 0.02)}
+
+    def grasp_phase_diagnostic(t, target):
+        state = rig.s0
+        bq = state.body_q.numpy()
+        TK, Tt = key_T(bq), tcp_T(bq)
+        relative = np.linalg.inv(Tt) @ TK
+        if st["grasp_ref"] is None:
+            st["grasp_ref"] = relative.copy()
+        delta = relative[:3, 3] - st["grasp_ref"][:3, 3]
+        rotation_delta = st["grasp_ref"][:3, :3].T @ relative[:3, :3]
+        rotation_angle = float(np.arccos(np.clip(
+            0.5 * (np.trace(rotation_delta) - 1.0), -1.0, 1.0)))
+        jq = state.joint_q.numpy()
+        fingers = np.asarray(jq[7:9], float)
+        face_gap = 2.0 * (float(fingers.mean()) - PAD_FACE_OFF - GS.finger_offset())
+        pressures = {}
+        for pad in ("gel_left", "gel_right"):
+            frames = getattr(rig, "tactile_frames", {}).get(pad, ())
+            pressure = (np.asarray(frames[-1].pressure_pa) if frames
+                        else np.zeros((0,), dtype=np.float32))
+            pressures[pad] = {"max_pa": float(pressure.max()) if pressure.size else 0.0,
+                              "nonzero": int(np.count_nonzero(pressure))}
+        TK0 = key_T(rig.s0.body_q.numpy())
+        key_com_z = float((TK0[:3, :3] @ h["key_raw"].center_mass + TK0[:3, 3])[2])
+        payload = {"event": "grasp_phase", "t": float(t), "phase": st["ph"],
+                   "finger_target_dof_m": float(target),
+                   "finger_actual_dof_m": fingers.tolist(),
+                   "effective_face_gap_m": face_gap,
+                   "gel_force_n": [last("padL"), last("padR")],
+                   "pressure": pressures,
+                   "tcp_tool_translation_delta_m": delta.tolist(),
+                   "tcp_tool_rotation_delta_rad": rotation_angle,
+                   "tool_lift_m": key_com_z - key_com_z0,
+                   "trim_m": float(st["trim"]),
+                   "trim_at_limit": bool(abs(st["trim"]) >= GRIP_TRIM_MAX - 1e-12)}
+        print("GRASP_DIAG " + json.dumps(payload), flush=True)
 
     def go(ph, t):
         q_, z_ = screw_qz()
@@ -1043,9 +1098,11 @@ def run(mode: str):
         """Finger target: F_CLOSE_DOF plus a slow admittance trim that only
         acts when the mean pad force leaves GRIP_BAND (GelSight readiness)."""
         F = 0.5 * (last("padL") + last("padR"))
-        if F < GRIP_BAND[0]:
+        band = (GS_PICK_GRIP_BAND if GS.GS_ON and st["ph"] in
+                ("hold", "lift", "lifthold") else GRIP_BAND)
+        if F < band[0]:
             st["trim"] = max(-GRIP_TRIM_MAX, st["trim"] - GRIP_TRIM_STEP)
-        elif F > GRIP_BAND[1]:
+        elif F > band[1]:
             st["trim"] = min(GRIP_TRIM_MAX, st["trim"] + GRIP_TRIM_STEP)
         return F_CLOSE_DOF + st["trim"]
 
@@ -1093,10 +1150,26 @@ def run(mode: str):
                 go("hold", t)
         elif ph == "hold":
             p = p_pick
-            if t - st["t0"] >= T["hold"]:
+            if GS.GS_ON:
+                bilateral = min(last("padL"), last("padR")) >= GS_PICK_GRIP_BAND[0]
+                st["grip_stable_frames"] = (st["grip_stable_frames"] + 1
+                                             if bilateral else 0)
+                stable_s = st["grip_stable_frames"] / rig.fps
+                if t - st["t0"] >= T["hold"] and stable_s >= GS_HOLD_STABLE_S:
+                    go("lift", t)
+                elif t - st["t0"] >= GS_HOLD_MAX_S:
+                    raise _GraspFailure(
+                        f"bilateral GelSight grip did not remain above "
+                        f"{GS_PICK_GRIP_BAND[0]:.2f} N for {GS_HOLD_STABLE_S:.2f} s")
+            elif t - st["t0"] >= T["hold"]:
                 go("lift", t)
         elif ph == "lift":
             p = p_pick + np.array([0.0, 0.0, 0.08]) * s5(frac(t))
+            if GS.GS_ON:
+                lost = min(last("padL"), last("padR")) < GS_LIFT_LOST_FORCE_N
+                st["grip_lost_frames"] = st["grip_lost_frames"] + 1 if lost else 0
+                if st["grip_lost_frames"] >= max(1, int(round(0.1 * rig.fps))):
+                    raise _GraspFailure("bilateral GelSight contact was lost during lift")
             if t - st["t0"] >= T["lift"]:
                 go("lifthold", t)
         elif ph == "lifthold":
@@ -1387,6 +1460,9 @@ def run(mode: str):
             droop.update(st["ph"] in ("settle", "pre"), p, Tt[:3, 3], st.get("p_last"))
         st["p_last"] = np.asarray(p, float)
         p_out = st["p"] + droop.v
+        if grasp_check and st["ph"] in ("close", "hold", "lift", "lifthold") \
+                and int(round(t * rig.fps)) % max(1, int(round(0.1 * rig.fps))) == 0:
+            grasp_phase_diagnostic(t, f_cmd)
         trk.step(p_out, HP.quat_of_R(st["R"]), f_cmd)
 
     def extra(state, t):
@@ -1440,6 +1516,11 @@ def run(mode: str):
 
     try:
         rec = rig.run(T_BUDGET, control, extra)
+    except _GraspFailure as error:
+        report = grasp_check_report()
+        report.update(status="failed", reason=str(error), stable_hold=False)
+        print("GRASP_CHECK " + json.dumps(report), flush=True)
+        return report
     except StopRun:
         if grasp_check:
             report = grasp_check_report()
