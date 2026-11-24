@@ -21,9 +21,25 @@ def _summary(observation):
                             "rgb_age_s": float(value["rgb_age_s"]),
                             "valid": bool(value["rgb_valid"])}
                     for name, value in cameras.items()},
-        "tactile_shape": (list(observation["tactile"].shape)
-                          if "tactile" in observation else None),
+        "tactile": (_tactile_summary(observation)
+                    if "tactile" in observation else None),
     }
+
+
+def _tactile_summary(observation):
+    pressure = np.asarray(observation["tactile"])
+    return {"shape": list(pressure.shape), "dtype": str(pressure.dtype),
+            "valid": np.asarray(observation["tactile_valid"], bool).tolist(),
+            "timestamp": float(observation["tactile_timestamp"]),
+            "age_s": float(observation["tactile_age_s"]),
+            "pressure_min_pa": float(pressure.min()),
+            "pressure_max_pa": float(pressure.max()),
+            "nonzero_elements": int(np.count_nonzero(pressure)),
+            "calibration": observation["tactile_calibration"]}
+
+
+def _emit(event, **values):
+    print(json.dumps({"event": event, **values}), flush=True)
 
 
 def main(argv=None):
@@ -34,32 +50,50 @@ def main(argv=None):
     args = parser.parse_args(argv)
     timing = PolicyTimeConfig(physics_hz=60, policy_hz=12,
                               observation_horizon=2, action_horizon=16)
+    _emit("scene_build_start", scene=args.scene)
+    if args.tactile:
+        _emit("gelsight_initialization_start", requested=True)
     env = ClosedLoopPolicyEnv(
         args.scene, config=PolicyEnvConfig(
             control_hz=12, visual_mode="both", rgb_fps=12,
             rgb_width=320, rgb_height=240, observation_horizon=2,
             include_tactile=args.tactile, time_config=timing,
             max_steps=args.steps))
+    executed, final_reason = 0, "not_started"
     try:
+        _emit("reset_start")
         observation = env.reset()
-        print(json.dumps({"event": "reset", **_summary(observation)}))
+        _emit("scene_build_end", rig_type=type(env.rig).__name__,
+              build_s=float(getattr(env.scene, "build_s", 0.0)))
+        if args.tactile:
+            _emit("gelsight_initialization_end",
+                  sensors=sorted(getattr(env.rig, "gel_sensors", {})))
+        _emit("reset_end", **_summary(observation))
         for index in range(args.steps):
             # A hold command is still a real controller command and advances
             # the unchanged physics pipeline for one 12 Hz policy interval.
             action = observation["robot_joint_position"].copy()
             env.replan(np.repeat(action[None], timing.action_horizon, axis=0))
             observation, reward, terminated, truncated, info = env.step_next()
-            print(json.dumps({"event": "step", "index": index,
-                              **_summary(observation),
-                              "command_timestamp": info["command_timestamp"],
-                              "effective_until": info["effective_until"],
-                              "action_success": info["action_success"],
-                              "terminated": terminated, "truncated": truncated,
-                              "evaluation": info.get("evaluation")}))
+            executed = index + 1
+            _emit("step", index=index, **_summary(observation),
+                  command_timestamp=info["command_timestamp"],
+                  effective_until=info["effective_until"],
+                  action_success=info["action_success"],
+                  terminated=terminated, truncated=truncated,
+                  evaluation=info.get("evaluation"))
             if terminated or truncated:
+                final_reason = (info.get("evaluation") or {}).get(
+                    "termination_reason", "terminated" if terminated else "truncated")
                 break
+        else:
+            final_reason = "requested_steps_completed"
+    except Exception as error:
+        final_reason = f"exception:{type(error).__name__}"
+        raise
     finally:
         env.close()
+        _emit("finished", executed_steps=executed, termination_reason=final_reason)
     return 0
 
 

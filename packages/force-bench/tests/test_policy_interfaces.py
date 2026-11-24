@@ -12,6 +12,8 @@ from force_bench.data.dataset import (EpisodeWindowDataset, WindowSpec,
                                       policy_observation_indices, split_episode_paths)
 from force_bench.data.episode import EpisodeWriter, atomic_json, load_episode
 from force_bench.policy.env import ClosedLoopPolicyEnv, PolicyEnvConfig
+from force_bench.rig import Rig
+from force_bench.teleop.scenes import _Captured, _patch_rig_runs
 from force_bench.robot.actions import (EndEffectorActionAdapter, EndEffectorActionConfig,
                                        JointPositionActionAdapter, compose_relative_pose)
 
@@ -263,6 +265,24 @@ def test_policy_env_reports_simulation_exception_separately():
     _, _, terminated, truncated, info = env.step(np.zeros(9))
     assert terminated and not truncated
     assert info["termination_reason"] == "simulation_exception"
+
+
+def test_scene_capture_patches_run_override_hidden_behind_module_alias():
+    class HiddenGelRig(Rig):
+        def run(self, *args, **kwargs):
+            raise AssertionError("expert rollout must not execute")
+
+    original = HiddenGelRig.__dict__["run"]
+
+    def capture(self, duration, control_cb, extra_forces_cb=None, print_every=20):
+        raise _Captured(self, control_cb, extra_forces_cb)
+
+    fake_rig = SimpleNamespace()
+    with _patch_rig_runs(capture):
+        with pytest.raises(_Captured) as captured:
+            HiddenGelRig.run(fake_rig, 65.0, object())
+        assert captured.value.rig is fake_rig
+    assert HiddenGelRig.__dict__["run"] is original
 
 
 def test_policy_env_repeated_reset_clears_time_history_and_action_chunk():

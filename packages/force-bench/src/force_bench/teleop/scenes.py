@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import importlib
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import numpy as np
@@ -106,6 +107,39 @@ class _Captured(Exception):
         self.rig, self.control_cb, self.extra_cb = rig, control_cb, extra_cb
 
 
+def _rig_run_overrides():
+    """Return every loaded Rig class that owns a run implementation.
+
+    Task modules may keep a subclass behind a module alias rather than bind
+    the class in their globals (GelSightRig is imported through tactile.task).
+    Walking the actual subclass tree makes scene capture independent of that
+    incidental import style.
+    """
+    found, pending = [Rig], list(Rig.__subclasses__())
+    seen = {Rig}
+    while pending:
+        cls = pending.pop()
+        if cls in seen:
+            continue
+        seen.add(cls)
+        pending.extend(cls.__subclasses__())
+        if "run" in cls.__dict__:
+            found.append(cls)
+    return found
+
+
+@contextmanager
+def _patch_rig_runs(replacement):
+    originals = [(cls, cls.__dict__["run"]) for cls in _rig_run_overrides()]
+    try:
+        for cls, _ in originals:
+            cls.run = replacement
+        yield
+    finally:
+        for cls, run in originals:
+            cls.run = run
+
+
 def _capture_task(task: str, args: tuple[str, ...] = ()):
     from force_bench.appendix_tasks.registry import BY_NAME as TASKS
     from force_bench.cli import _run_plan
@@ -119,24 +153,16 @@ def _capture_task(task: str, args: tuple[str, ...] = ()):
     def patched(self, duration, control_cb, extra_forces_cb=None, print_every=20):
         raise _Captured(self, control_cb, extra_forces_cb)
 
-    originals = [(Rig, Rig.run)]
-    Rig.run = patched
-    for obj in list(vars(mod).values()):
-        if (isinstance(obj, type) and issubclass(obj, Rig) and obj is not Rig
-                and "run" in obj.__dict__):
-            originals.append((obj, obj.__dict__["run"]))
-            obj.run = patched
     import sys
     argv = sys.argv
     sys.argv = [spec.dotted, *task_argv]
     try:
-        mod.main()
+        with _patch_rig_runs(patched):
+            mod.main()
     except _Captured as c:
         return c
     finally:
         sys.argv = argv
-        for cls, fn in originals:
-            cls.run = fn
     raise RuntimeError(f"{task}: main() returned without calling Rig.run")
 
 
