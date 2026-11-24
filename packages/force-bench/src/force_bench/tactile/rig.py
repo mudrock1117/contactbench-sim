@@ -98,6 +98,17 @@ CASE_TIP_EXTEND = float(os.environ.get("GS_CASE_TIP_EXTEND", "0")) * 1e-3
 CASE_Z = FINGERTIP_Z_END + CASE_TIP_EXTEND - 0.5 * CASE_FACE_H
 
 
+def case_tip_align_extension_m() -> float:
+    """Extension that puts the active gel edge at the fingertip end.
+
+    The case remains unchanged by default. Tasks that must pick a flat object
+    at the last millimetres of the fingertip can opt into this mounting offset
+    and raise their TCP by the same amount to preserve table clearance.
+    """
+    gel_along_finger = GEL_PAD_W if LONG_ALONG_FINGER else GEL_PAD_H
+    return 0.5 * (CASE_FACE_H - gel_along_finger)
+
+
 def pad_proud_m(mount: str | None = None) -> float:
     """How far the SENSING FACE sits in front of the bare fingertip face.
     The single source of truth for every finger-dof offset
@@ -192,7 +203,8 @@ class GelSightRig(Rig):
 
     # ── mounting (before finalize) ──────────────────────────────────────
     def mount_gelsight_on_fr3(self, embed: float = 0.0005,
-                              as_mesh: bool | None = None) -> dict[str, int]:
+                              as_mesh: bool | None = None,
+                              case_tip_extend_m: float | None = None) -> dict[str, int]:
         """Replace both fingertip rubber-tip boxes with gel pads.
 
         ``as_mesh`` (default ``GS_GEL_MESH`` != "0"): build the gel as a mesh
@@ -217,7 +229,8 @@ class GelSightRig(Rig):
             body = self.builder.body_label.index(name)
             tip = self._find_rubber_tip(body)
             if self.mount_style == "case":
-                self._mount_case(body, name, cfg, q_gel, as_mesh)
+                self._mount_case(body, name, cfg, q_gel, as_mesh,
+                                 case_tip_extend_m)
                 continue
             # The URDF rubber-tip box stays live as the gel's RIGID BACKING:
             # its face sits at finger y=0, 3.5 mm behind the gel's sensing
@@ -252,7 +265,8 @@ class GelSightRig(Rig):
         self.gel_face_z = cfg.gel_thickness_m
         return dict(self.gel_shapes)
 
-    def _mount_case(self, body, name, cfg, q_gel, as_mesh):
+    def _mount_case(self, body, name, cfg, q_gel, as_mesh,
+                    case_tip_extend_m=None):
         """GS Mini as an ASSET: rigid housing (collides, has mass) + gel on
         its face.  The case face sits CASE_PROUD in front of the bare
         fingertip face (finger y = 0 at the rubber-tip face), the sensing
@@ -264,6 +278,11 @@ class GelSightRig(Rig):
         b = self.builder
         pad = "gel_left" if "left" in name else "gel_right"
         t = cfg.gel_thickness_m
+        extension = (CASE_TIP_EXTEND if case_tip_extend_m is None
+                     else float(case_tip_extend_m))
+        if not np.isfinite(extension) or extension < 0.0:
+            raise ValueError("case_tip_extend_m must be finite and nonnegative")
+        case_z = FINGERTIP_Z_END + extension - 0.5 * CASE_FACE_H
         # housing: centre CASE_DEPTH/2 behind its face; face at y = -CASE_PROUD
         case_cfg = newton.ModelBuilder.ShapeConfig(
             density=CASE_MASS / (CASE_FACE_W * CASE_FACE_H * CASE_DEPTH),
@@ -271,7 +290,7 @@ class GelSightRig(Rig):
             is_visible=_shell_visual_mesh() is None)
         case = b.add_shape_box(
             body, xform=wp.transform(
-                wp.vec3(0.0, -CASE_PROUD + 0.5 * CASE_DEPTH, CASE_Z),
+                wp.vec3(0.0, -CASE_PROUD + 0.5 * CASE_DEPTH, case_z),
                 wp.quat_identity()),
             hx=0.5 * CASE_FACE_W, hy=0.5 * CASE_DEPTH, hz=0.5 * CASE_FACE_H,
             cfg=case_cfg, color=(0.13, 0.14, 0.16), label=pad + "_case")
@@ -284,14 +303,14 @@ class GelSightRig(Rig):
             b.add_shape_mesh(
                 body, mesh=mesh_v,
                 xform=wp.transform(
-                    wp.vec3(float(c[0]), float(c[1]), CASE_Z + float(c[2])),
+                    wp.vec3(float(c[0]), float(c[1]), case_z + float(c[2])),
                     wp.quat_identity()),
                 cfg=vis_cfg, color=(0.13, 0.14, 0.16),
                 label=pad + "_shell")
         # gel: physics slab 2t thick, sensing face at
         # y = -(CASE_PROUD + GEL_PROUD_OF_CASE); slab centre t behind it
         face_y = -(CASE_PROUD + GEL_PROUD_OF_CASE)
-        xf = wp.transform(wp.vec3(0.0, face_y + t, CASE_Z), q_gel)
+        xf = wp.transform(wp.vec3(0.0, face_y + t, case_z), q_gel)
         self.gel_shapes[pad] = attach_gelsight_pad(
             b, body, cfg, xform=xf, label=pad,
             physics_thickness_m=2.0 * t, as_mesh=as_mesh,
@@ -308,6 +327,7 @@ class GelSightRig(Rig):
         self.tactile_frames[pad] = []
         self._gel_embed = t - pad_proud_m("case") + 0.0   # informational
         self.gel_face_z = t
+        self.case_tip_extend_m = extension
 
     def _find_rubber_tip(self, body: int) -> int:
         for s in self.builder.body_shapes.get(body, []):
@@ -476,7 +496,17 @@ class GelSightRig(Rig):
             collection = collector_from_env(self)
         for fi in range(n):
             t_a = _time.perf_counter()
-            control_cb(t)
+            try:
+                control_cb(t)
+            except BaseException:
+                # Match Rig.run: a task's StopRun is a normal early terminal
+                # after the last complete transition, not a reason to lose a
+                # valid tactile episode. The pending action has no next state.
+                if collection is not None and collection.writer.actions:
+                    collection.finish(discard_pending=True)
+                elif collection is not None:
+                    collection.abort()
+                raise
             if collection is not None:
                 collection.after_control()
             every_substep = self.effective_collide_every_substep()
@@ -551,5 +581,5 @@ class GelSightRig(Rig):
                 msg = " ".join(f"{k}={v}" for k, v in list(forces.items())[:5])
                 print(f"t={t:5.2f}s {msg}")
         if collection is not None:
-            collection.finish()
+            collection.finish(discard_pending=True)
         return self.rec

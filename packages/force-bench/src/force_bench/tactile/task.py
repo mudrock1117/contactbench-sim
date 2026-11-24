@@ -78,6 +78,14 @@ def finger_offset() -> float:
     return pad_proud_m()
 
 
+def case_tip_align_extension() -> float:
+    """Optional case shift that exposes the Gel at the fingertip end."""
+    if not GS_ON or os.environ.get("GS_MOUNT", "case") != "case":
+        return 0.0
+    from force_bench.tactile.rig import case_tip_align_extension_m
+    return case_tip_align_extension_m()
+
+
 def task_name(name: str) -> str:
     return name + SUFFIX if GS_ON else name
 
@@ -93,14 +101,16 @@ def make_rig(name: str, **kw):
     return Rig(name, **kw)
 
 
-def mount(rig) -> dict:
+def mount(rig, *, case_tip_extend_m: float | None = None) -> dict:
     """Mount the pads (after add_robot, before finalize).  No-op when off."""
 
     if not GS_ON:
         return {}
-    shapes = rig.mount_gelsight_on_fr3(embed=EMBED)
+    shapes = rig.mount_gelsight_on_fr3(
+        embed=EMBED, case_tip_extend_m=case_tip_extend_m)
     print(f"[gelsight] pads mounted on the FR3 fingers: {shapes}; "
-          f"sensing face {finger_offset() * 1e3:.1f} mm proud of the bare tip")
+          f"sensing face {finger_offset() * 1e3:.1f} mm proud of the bare tip; "
+          f"case tip extension {float(getattr(rig, 'case_tip_extend_m', 0.0)) * 1e3:.3f} mm")
     return shapes
 
 

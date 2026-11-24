@@ -13,6 +13,9 @@ from force_bench.data.timebase import (ActionChunkExecutor, PolicyTimeConfig,
 from force_bench.data.compare_wrist_mounts import (DEFAULT_CANDIDATES, load_candidates,
                                                     load_full_states)
 from force_bench.policy.evaluation import AllenKeyPolicyEvaluator
+from force_bench.tactile.rig import (CASE_FACE_H, FINGERTIP_Z_END, GEL_PAD_H,
+                                     GEL_PAD_W, LONG_ALONG_FINGER,
+                                     case_tip_align_extension_m)
 
 
 class Array:
@@ -34,6 +37,14 @@ class FakeCamera:
     def render(self, state):
         return np.full((self.height, self.width, 3), int(round(self.T[0, 3] * 10)) % 255,
                        dtype=np.uint8)
+
+
+def test_allen_case_tip_extension_aligns_active_gel_with_fingertip_end():
+    extension = case_tip_align_extension_m()
+    case_center = FINGERTIP_Z_END + extension - 0.5 * CASE_FACE_H
+    gel_along_finger = GEL_PAD_W if LONG_ALONG_FINGER else GEL_PAD_H
+    assert extension > 0
+    assert case_center + 0.5 * gel_along_finger == pytest.approx(FINGERTIP_Z_END)
 
 
 def _camera_rig(x=0.0):

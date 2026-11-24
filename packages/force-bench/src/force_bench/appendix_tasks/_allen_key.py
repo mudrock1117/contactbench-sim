@@ -163,13 +163,14 @@ THE PINCH, AND WHY THE GRIPPED STRETCH OF THE KEY IS A BOX
   overlap is part of the penetration check (SAT depth of the pad box vs
   the leg box, every frame).
 
-GELSIGHT READINESS: finger targets are the named constants F_TOUCH_DOF /
+GELSIGHT: finger targets are the named constants F_TOUCH_DOF /
 F_CLOSE_DOF / F_OPEN_DOF / TIP_CLEAR / KEY_XP (add finger_offset() to the
 dof ones); the grip carries a force band (GRIP_BAND, admittance trim on the
-pad PairProbes); the 28 mm GS case clears the short leg in both the flat
-pick and the tilted pose; the key contact sits in the last 3.5 mm of the
-fingertip, outside the gel's imaged window (as in the nut task) -- a
-deeper grasp or GS_CASE_TIP_EXTEND would be needed for a non-empty image.
+actual Gel normal force). The flat key occupies the last 3.5 mm of the
+fingertip, so the Allen-specific case mount extends by GS_TIP_EXTEND and
+raises the TCP by the same distance: the active Gel reaches the key while
+the case keeps the original table clearance. AK_GS_CASE_TIP_EXTEND_MM is
+an explicit diagnostic override; bare Gel mounts need no extension.
 
 MEASURED (draft runs of this module, TB_RENDER_FAST=1 -- identical physics;
 the publication runs' numbers are in outputs/appendix_tasks/<name>/
@@ -193,6 +194,7 @@ Run:  python -m force_bench.appendix_tasks.tighten_screw_with_allen_key_from_tab
 
 from __future__ import annotations
 
+import json
 import os
 
 import numpy as np
@@ -263,10 +265,12 @@ PAD_FACE_OFF = HP.PAD_FACE_OFF
 TIP_BELOW_TCP = HP.TIP_BELOW_TCP   # 9.5 mm
 KEY_XP = 22.0 * MM             # pinch point along the long leg from the bend
 TIP_CLEAR = _env("AK_TIP_CLEAR", 1.5 * MM)
+GS_TIP_EXTEND = _env(
+    "AK_GS_CASE_TIP_EXTEND_MM", GS.case_tip_align_extension() / MM) * MM
 # fingertips above the table at the pick (the suite's 1.5 mm).  The pads then
 # cover 3.5 of the leg's 5 mm side faces; the gripped stretch is an analytic
 # box (see build_scene for why a mesh there pushed the key out of the pinch).
-TCP_H = TIP_BELOW_TCP + TIP_CLEAR - KEY_HALF   # TCP above the leg axis (8.5 mm)
+TCP_H = TIP_BELOW_TCP + TIP_CLEAR - KEY_HALF + GS_TIP_EXTEND
 SQUEEZE = _env("AK_SQUEEZE", 1.5 * MM)          # ~9-10 N/pad realised at 8 kN/m
 # (1.0 mm / ~6 N in the first draft: over seven strokes the drive torque kept
 # the pinch slipping in roll and the 1-3 N press crept the key 6.3 mm up
@@ -744,6 +748,9 @@ def run(mode: str):
     assert mode in ("tighten", "loosen")
     name = f"{mode}_screw_with_allen_key_from_table"
     stop_at = os.environ.get("AK_STOP", "")
+    grasp_check = os.environ.get("AK_GRASP_CHECK", "0") == "1"
+    if grasp_check and os.environ.get("TB_COLLECT_DIR"):
+        raise RuntimeError("AK_GRASP_CHECK is diagnostic only and cannot publish a dataset episode")
     rig = (appendix_rig(name, rig_cls=GS.GelSightRig, gel_config=GS.GEL_CFG)
            if GS.GS_ON else appendix_rig(name))
     rig.hard_joint_limits = True              # the seat is a HARD stop
@@ -751,7 +758,7 @@ def run(mode: str):
     h = build_scene(rig, mode)
     if GS.GS_ON:
         GS.hydroelastic(rig, "allen_key")
-        GS.mount(rig)
+        GS.mount(rig, case_tip_extend_m=GS_TIP_EXTEND)
     b = rig.builder
     c_K = h["c_K"]
     T_K0 = h["T_K0"]
@@ -825,9 +832,10 @@ def run(mode: str):
             fov_deg=CAM_FOV)
         return None
     rig.finalize(probes=["allen_key"], cam_pos=cam_p, cam_target=cam_t, record=False)
-    rig.rec = RolloutRecorder(rig.model, rig.out_dir, cam_pos=cam_p, cam_target=cam_t,
-                              fps=rig.fps, fov_deg=float(CAM_FOV),
-                              cam2_pos=cam2_p, cam2_target=cam2_t)
+    if not grasp_check:
+        rig.rec = RolloutRecorder(rig.model, rig.out_dir, cam_pos=cam_p, cam_target=cam_t,
+                                  fps=rig.fps, fov_deg=float(CAM_FOV),
+                                  cam2_pos=cam2_p, cam2_target=cam2_t)
     model = rig.model
     # kit colours (after the recorder's studio palette): yellow block, grey
     # screw, black key
@@ -888,6 +896,11 @@ def run(mode: str):
     droop = HP.DroopComp()
 
     def last(nm, key="force"):
+        if GS.GS_ON and nm in ("padL", "padR") and key == "force":
+            pad = "gel_left" if nm == "padL" else "gel_right"
+            frames = getattr(rig, "tactile_frames", {}).get(pad, ())
+            if frames:
+                return float(frames[-1].total_normal_force_n)
         hh = rig.probes[nm].history
         return hh[-1][key] if hh else 0.0
 
@@ -928,8 +941,49 @@ def run(mode: str):
               probe=0.0, from_p=None, from_R=None, psi_end=None, place_z=None,
               ins_depth=[], G_log=[], strokes=[], unwinds=[], turn_sub="run", t_sub=0.0,
               psi_seat=None, tau_pk=0.0, unw_ok=0)
+    key_com_z0 = float((key_T(rig.s0.body_q.numpy())[:3, :3] @
+                        h["key_raw"].center_mass + key_T(rig.s0.body_q.numpy())[:3, 3])[2])
     order = ORDER
     log = []
+
+    def grasp_check_report():
+        state = rig.s0
+        bq = state.body_q.numpy()
+        TK, Tt = key_T(bq), tcp_T(bq)
+        jq = state.joint_q.numpy()
+        fingers = np.asarray(jq[7:9], float)
+        proud = GS.finger_offset()
+        face_gap = 2.0 * (float(fingers.mean()) - PAD_FACE_OFF - proud)
+        pressures, valid = {}, []
+        for pad in ("gel_left", "gel_right"):
+            frames = getattr(rig, "tactile_frames", {}).get(pad, ())
+            if frames:
+                pressure = np.asarray(frames[-1].pressure_pa)
+                pressures[pad] = {"max_pa": float(pressure.max()),
+                                  "nonzero": int(np.count_nonzero(pressure))}
+                valid.append(True)
+            else:
+                pressures[pad] = {"max_pa": 0.0, "nonzero": 0}
+                valid.append(False)
+        key_com_z = float((TK[:3, :3] @ h["key_raw"].center_mass + TK[:3, 3])[2])
+        lift = key_com_z - key_com_z0
+        forces = [last("padL"), last("padR")]
+        body_qd = state.body_qd.numpy()[ki]
+        linear_speed = float(np.linalg.norm(body_qd[3:]))
+        return {"mode": "grasp_check", "complete_task_qa": False,
+                "gelsight": bool(GS.GS_ON),
+                "case_tip_extend_m": float(GS_TIP_EXTEND),
+                "T_world_tcp": Tt.tolist(),
+                "T_world_tool": TK.tolist(),
+                "T_tcp_tool": (np.linalg.inv(Tt) @ TK).tolist(),
+                "finger_target_dof_m": float(st["f"]),
+                "finger_actual_dof_m": fingers.tolist(),
+                "effective_face_gap_m": face_gap,
+                "pad_normal_force_n": forces,
+                "tactile_valid": valid, "pressure": pressures,
+                "tool_lift_m": lift, "tool_linear_speed_m_s": linear_speed,
+                "stable_hold": bool(lift > 0.050 and min(forces) > 0.5
+                                    and linear_speed < 0.02)}
 
     def go(ph, t):
         q_, z_ = screw_qz()
@@ -1055,6 +1109,8 @@ def run(mode: str):
                     Gp[:3, 3] = (st["G"][:3, 3] * n + Gm[:3, 3]) / (n + 1)
                 st["G"], st["G_n"] = Gp, n + 1
             if t - st["t0"] >= T["lifthold"]:
+                if grasp_check:
+                    raise StopRun
                 g = st["G"]
                 print(f"   in-hand grasp: TCP in K {np.round(g[:3, 3] / MM, 2)} mm "
                       f"(nominal {np.round(G_NOM[:3, 3] / MM, 2)})")
@@ -1385,6 +1441,10 @@ def run(mode: str):
     try:
         rec = rig.run(T_BUDGET, control, extra)
     except StopRun:
+        if grasp_check:
+            report = grasp_check_report()
+            print("GRASP_CHECK " + json.dumps(report), flush=True)
+            return report
         rec = rig.rec
         print(f"[{name}] rollout ended at t={len(rec.times) / rig.fps:.2f}s (phase {st['ph']})")
     paths = rec.save("rollout", force_keys=["padL_N", "padR_N", "key_screw_N",
