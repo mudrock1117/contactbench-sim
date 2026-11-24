@@ -23,6 +23,10 @@ from force_bench.geometry import world_T
 from .episode import atomic_json
 
 CAMERA_NAME = "fixed"
+DEFAULT_WRIST_POSITION_TCP = np.array([0.055, 0.0, -0.035])
+DEFAULT_WRIST_TARGET_TCP = np.array([0.0, 0.0, 0.110])
+DEFAULT_WRIST_UP_TCP = np.array([0.0, 1.0, 0.0])
+DEFAULT_WRIST_FOV_DEG = 72.0
 
 
 def _validate_rigid_transform(transform, name):
@@ -71,6 +75,58 @@ def wrist_mount_from_tcp(T_link_tcp, position_tcp, target_tcp, *, up_tcp=(0.0, 1
     return _validate_rigid_transform(
         T_link_tcp @ camera_lookat_matrix(position_tcp, target_tcp, up_tcp),
         "T_link_camera")
+
+
+def ensure_collection_cameras(rig, camera_names, *, fixed_camera=None):
+    """Install reusable camera *definitions* without creating renderers.
+
+    ``Rig.finalize`` records its task-authored rollout view as
+    ``_collection_fixed_camera_default``.  This function promotes that view
+    only when RGB is requested and derives the validated A wrist mount from
+    the rig's fixed link7-to-TCP transform.  Existing task-specific
+    definitions (notably Allen Key) are never replaced, making the operation
+    idempotent for normal, GelSight, and appendix-derived rigs.
+    """
+
+    names = tuple(dict.fromkeys(camera_names))
+    unknown = set(names) - {"fixed", "wrist"}
+    if unknown:
+        raise ValueError(f"unsupported collection cameras: {sorted(unknown)}")
+    if not names:
+        return {}
+
+    if "fixed" in names and getattr(rig, "collection_fixed_camera", None) is None:
+        definition = fixed_camera
+        if definition is None:
+            definition = getattr(rig, "collection_camera", None)
+        if definition is None:
+            definition = getattr(rig, "_collection_fixed_camera_default", None)
+        if definition is None:
+            raise ValueError("fixed RGB requested but the task has no static camera definition")
+        rig.collection_fixed_camera = definition
+        if getattr(rig, "collection_camera", None) is None:
+            rig.collection_camera = definition
+
+    if "wrist" in names and getattr(rig, "collection_wrist_camera", None) is None:
+        if not hasattr(rig, "ik"):
+            raise ValueError("wrist RGB requires a rig with FrankaIK")
+        T_world_link = world_T(rig.ik.body_pose("fr3/fr3_link7"))
+        T_world_tcp = world_T(rig.ik.tcp_pose())
+        T_link_tcp = np.linalg.inv(T_world_link) @ T_world_tcp
+        T_link_camera = wrist_mount_from_tcp(
+            T_link_tcp, DEFAULT_WRIST_POSITION_TCP, DEFAULT_WRIST_TARGET_TCP,
+            up_tcp=DEFAULT_WRIST_UP_TCP)
+        rig.collection_wrist_camera = {
+            "link_label": "fr3/fr3_link7",
+            "T_link_camera": T_link_camera,
+            "mount_frame": "fr3/fr3_hand_tcp",
+            "position_tcp": DEFAULT_WRIST_POSITION_TCP.copy(),
+            "target_tcp": DEFAULT_WRIST_TARGET_TCP.copy(),
+            "up_tcp": DEFAULT_WRIST_UP_TCP.copy(),
+            "optical_axis": "camera -Z points from position_tcp to target_tcp",
+            "fov_deg": DEFAULT_WRIST_FOV_DEG,
+        }
+    return {name: getattr(rig, f"collection_{name}_camera") for name in names}
 
 
 def _intrinsics(width, height, fov_deg):

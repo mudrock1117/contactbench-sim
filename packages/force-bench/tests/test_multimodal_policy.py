@@ -4,7 +4,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from force_bench.data.rgb import (LiveRGBCamera, camera_lookat_matrix,
+from force_bench.data.rgb import (DEFAULT_WRIST_FOV_DEG,
+                                  DEFAULT_WRIST_POSITION_TCP,
+                                  DEFAULT_WRIST_TARGET_TCP, LiveRGBCamera,
+                                  camera_lookat_matrix,
+                                  ensure_collection_cameras,
                                   wrist_mount_from_tcp)
 from force_bench.data.task_language import task_instruction
 from force_bench.data.timebase import (ActionChunkExecutor, PolicyTimeConfig,
@@ -14,8 +18,9 @@ from force_bench.data.compare_wrist_mounts import (DEFAULT_CANDIDATES, load_cand
                                                     load_full_states)
 from force_bench.policy.evaluation import AllenKeyPolicyEvaluator
 from force_bench.tactile.rig import (CASE_FACE_H, FINGERTIP_Z_END, GEL_PAD_H,
-                                     GEL_PAD_W, LONG_ALONG_FINGER,
+                                     GEL_PAD_W, LONG_ALONG_FINGER, GelSightRig,
                                      case_tip_align_extension_m)
+from force_bench.rig import Rig
 
 
 class Array:
@@ -79,6 +84,61 @@ def test_wrist_mount_optical_minus_z_points_along_tcp_tool_axis():
     np.testing.assert_allclose(T[:3, 3], position)
     np.testing.assert_allclose(T[:3, :3].T @ T[:3, :3], np.eye(3), atol=1e-12)
     assert np.linalg.det(T[:3, :3]) == pytest.approx(1.0)
+
+
+class FakeIK:
+    def body_pose(self, label):
+        assert label == "fr3/fr3_link7"
+        return np.array([0, 0, 0, 0, 0, 0, 1], dtype=float)
+    def tcp_pose(self):
+        return np.array([0, 0, 0.10, 0, 0, 0, 1], dtype=float)
+
+
+@pytest.mark.parametrize("rig_type", [Rig, GelSightRig])
+def test_plain_and_gelsight_rigs_share_dual_camera_initialization(rig_type):
+    rig = object.__new__(rig_type)
+    rig.ik = FakeIK()
+    rig._collection_fixed_camera_default = {
+        "position": np.array([0.14, -0.275, 0.19]),
+        "target": np.array([-0.02, 0.005, 0.05]), "fov_deg": 40.0}
+    cameras = ensure_collection_cameras(rig, ["fixed", "wrist"])
+    assert tuple(cameras) == ("fixed", "wrist")
+    np.testing.assert_allclose(cameras["wrist"]["position_tcp"],
+                               DEFAULT_WRIST_POSITION_TCP)
+    np.testing.assert_allclose(cameras["wrist"]["target_tcp"],
+                               DEFAULT_WRIST_TARGET_TCP)
+    assert cameras["wrist"]["fov_deg"] == DEFAULT_WRIST_FOV_DEG
+
+
+def test_derived_card_camera_uses_task_view_and_initialization_is_idempotent():
+    rig = SimpleNamespace(ik=FakeIK(), appendix_source_name="card_pick",
+                          _collection_fixed_camera_default={
+                              "position": np.array([0.14, -0.275, 0.19]),
+                              "target": np.array([-0.02, 0.005, 0.05]),
+                              "fov_deg": 40.0})
+    first = ensure_collection_cameras(rig, ["fixed", "wrist"])
+    fixed_id, wrist_id = id(first["fixed"]), id(first["wrist"])
+    second = ensure_collection_cameras(rig, ["fixed", "wrist"])
+    assert id(second["fixed"]) == fixed_id
+    assert id(second["wrist"]) == wrist_id
+    np.testing.assert_allclose(first["fixed"]["target"], [-0.02, 0.005, 0.05])
+
+
+def test_disabled_rgb_creates_no_collection_camera_and_allen_definition_wins():
+    disabled = SimpleNamespace(ik=FakeIK())
+    assert ensure_collection_cameras(disabled, []) == {}
+    assert not hasattr(disabled, "collection_fixed_camera")
+    assert not hasattr(disabled, "collection_wrist_camera")
+
+    allen_fixed = {"position": [1, 2, 3], "target": [0, 0, 0], "fov_deg": 40}
+    allen_wrist = {"link_label": "fr3/fr3_link7", "T_link_camera": np.eye(4),
+                   "position_tcp": [0.055, 0, -0.035],
+                   "target_tcp": [0, 0, 0.110], "fov_deg": 72}
+    allen = SimpleNamespace(ik=FakeIK(), collection_fixed_camera=allen_fixed,
+                            collection_wrist_camera=allen_wrist)
+    cameras = ensure_collection_cameras(allen, ["fixed", "wrist"])
+    assert cameras["fixed"] is allen_fixed
+    assert cameras["wrist"] is allen_wrist
 
 
 def test_camera_lookat_rejects_degenerate_up_axis():

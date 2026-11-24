@@ -125,6 +125,9 @@ class ClosedLoopPolicyEnv:
         self.chunk_executor = ActionChunkExecutor()  # never cross an episode boundary
         names = (["fixed", "wrist"] if self.config.visual_mode == "both"
                  else ([] if self.config.visual_mode == "none" else [self.config.visual_mode]))
+        if names:
+            from force_bench.data.rgb import ensure_collection_cameras
+            ensure_collection_cameras(self.rig, names)
         for name in names:
             definition = getattr(self.rig, f"collection_{name}_camera", None)
             if definition is None and name == "fixed":

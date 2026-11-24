@@ -306,10 +306,13 @@ class RigCollector:
 
 
 def collector_from_env(rig):
-    from .rgb import rgb_config_from_env
+    from .rgb import ensure_collection_cameras, rgb_config_from_env
+    rgb_config = rgb_config_from_env()
+    if rgb_config.get("enabled"):
+        ensure_collection_cameras(rig, rgb_config.get("cameras", ["fixed"]))
     return RigCollector(rig, os.environ["TB_COLLECT_DIR"],
                         task=os.environ.get("TB_COLLECT_TASK", rig.name),
                         seed=int(os.environ.get("TB_COLLECT_SEED", "0")),
                         source=os.environ.get("TB_COLLECT_SOURCE", "scripted_expert"),
                         tactile_size=int(os.environ.get("TB_COLLECT_TACTILE_SIZE", "16")),
-                        rgb_config=rgb_config_from_env())
+                        rgb_config=rgb_config)

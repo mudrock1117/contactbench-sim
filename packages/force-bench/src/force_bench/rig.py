@@ -675,6 +675,14 @@ class Rig:
             broad_phase="sap")
         self.contacts = self.pipeline.contacts()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.s0)
+        # Every task already authors a static rollout view through finalize().
+        # Keep it as a lightweight definition; no RGB renderer is constructed
+        # unless collection or the policy environment explicitly requests one.
+        self._collection_fixed_camera_default = {
+            "position": np.asarray(cam_pos, dtype=float).copy(),
+            "target": np.asarray(cam_target, dtype=float).copy(),
+            "fov_deg": 40.0,
+        }
         self.rec = RolloutRecorder(self.model, self.out_dir,
                                    cam_pos=cam_pos, cam_target=cam_target,
                                    cam2_pos=cam2_pos, cam2_target=cam2_target,
@@ -784,4 +792,3 @@ class Rig:
         report = json.load(open(self.out_dir / "rollout_qa.json"))
         print("QA PASS" if report["pass"] else "QA FAIL")
         return report
-

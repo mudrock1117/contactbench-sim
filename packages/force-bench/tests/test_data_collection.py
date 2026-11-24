@@ -7,7 +7,8 @@ import pytest
 
 from force_bench.data import EpisodeWriter, discover_episodes, load_episode
 from force_bench.data.collect import qa_outcome
-from force_bench.data.collection import RigCollector, RigObservation, read_tactile
+from force_bench.data.collection import (RigCollector, RigObservation,
+                                         collector_from_env, read_tactile)
 from force_bench.data.rgb import FixedRGBCapture, rgb_config_from_env, validate_rgb_directory
 
 
@@ -149,6 +150,33 @@ def test_tactile_force_without_pressure_raster_is_invalid():
     pressure, valid = read_tactile(rig, size=2)
     assert pressure.shape == (2, 2, 2)
     assert not valid.any()
+
+
+def test_card_collector_env_initializes_requested_dual_cameras(monkeypatch, tmp_path):
+    class IK:
+        def body_pose(self, label):
+            assert label == "fr3/fr3_link7"
+            return np.array([0, 0, 0, 0, 0, 0, 1], dtype=float)
+        def tcp_pose(self):
+            return np.array([0, 0, 0.1, 0, 0, 0, 1], dtype=float)
+
+    rig = SimpleNamespace(name="retrieve_card_from_deck", ik=IK(),
+                          _collection_fixed_camera_default={
+                              "position": np.array([0.14, -0.275, 0.19]),
+                              "target": np.array([-0.02, 0.005, 0.05]),
+                              "fov_deg": 40.0})
+    received = {}
+    def fake_collector(rig_arg, output, **kwargs):
+        received.update(rig=rig_arg, output=output, kwargs=kwargs)
+        return "collector"
+    monkeypatch.setattr("force_bench.data.collection.RigCollector", fake_collector)
+    monkeypatch.setenv("TB_COLLECT_DIR", str(tmp_path))
+    monkeypatch.setenv("TB_COLLECT_RGB", "1")
+    monkeypatch.setenv("TB_COLLECT_RGB_CAMERAS", "both")
+    assert collector_from_env(rig) == "collector"
+    assert received["kwargs"]["rgb_config"]["cameras"] == ["fixed", "wrist"]
+    assert rig.collection_fixed_camera is rig.collection_camera
+    assert rig.collection_wrist_camera["link_label"] == "fr3/fr3_link7"
 
 
 def test_process_failure_beats_even_fresh_qa_pass(tmp_path):
