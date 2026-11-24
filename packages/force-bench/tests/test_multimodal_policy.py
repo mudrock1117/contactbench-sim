@@ -16,8 +16,13 @@ from force_bench.policy.evaluation import AllenKeyPolicyEvaluator
 
 
 class Array:
-    def __init__(self, value): self.value = np.asarray(value, dtype=float)
+    def __init__(self, value): self.value = np.asarray(value, dtype=float).copy()
     def numpy(self): return self.value.copy()
+    def assign(self, value):
+        value = np.asarray(value, dtype=self.value.dtype)
+        if value.shape != self.value.shape:
+            raise ValueError(f"shape mismatch: {value.shape} != {self.value.shape}")
+        self.value[...] = value
 
 
 class FakeCamera:
