@@ -112,6 +112,88 @@ class AllenKeyPolicyEvaluator:
                            if physical else "one or more independent physical checks failed")}
 
 
+class CardRetrievalPolicyEvaluator:
+    """Online-measurable subset of the original retrieve-card appendix QA.
+
+    The original verdict also audits rollout contact histories.  Those checks
+    are not inferred here, so ``strict_success`` and ``success`` deliberately
+    remain ``None`` even when the physical state subset passes.
+    """
+    def reset(self, scene=None, rig=None, timestamp=0.0):
+        self.initial = None
+        self.release_link_position = None
+        self.had_closed_grasp = False
+        if rig is not None:
+            labels = [str(value) for value in rig.model.body_label]
+            required = ("card_picked", "card_a", "card_b", "card_c")
+            if all(label in labels for label in required):
+                body_q = rig.s0.body_q.numpy()
+                self.initial = {label: body_q[labels.index(label)].copy()
+                                for label in required}
+
+    @staticmethod
+    def _rotation(quaternion):
+        x, y, z, w = quaternion
+        return np.array([[1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
+                         [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)],
+                         [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x + y*y)]])
+
+    def __call__(self, scene, rig, timestamp):
+        labels = [str(value) for value in rig.model.body_label]
+        required = ("card_picked", "card_a", "card_b", "card_c")
+        if self.initial is None or not all(label in labels for label in required):
+            return {"status": "unvalidated", "success": None, "strict_success": None,
+                    "physical_success": None, "source": "unavailable",
+                    "unsupported_checks": ["card bodies unavailable"],
+                    "reason": "scene does not expose card retrieval state"}
+        from force_bench.tasks import card_pick
+        body_q = rig.s0.body_q.numpy()
+        picked = body_q[labels.index("card_picked")]
+        normal = self._rotation(picked[3:7])[:, 0]
+        card_ok = bool(abs(float(normal[2])) > 0.95 and picked[2] < 0.004 and picked[0] > 0.0)
+        deck = {}
+        deck_ok = True
+        for label in ("card_a", "card_b", "card_c"):
+            pose, initial = body_q[labels.index(label)], self.initial[label]
+            displacement = float(np.linalg.norm(pose[:3] - initial[:3]))
+            n0 = self._rotation(initial[3:7])[:, 0]
+            n1 = self._rotation(pose[3:7])[:, 0]
+            tilt = float(np.degrees(np.arccos(np.clip(abs(n0 @ n1), -1, 1))))
+            in_slot = bool(card_pick.SLOT_X[0] - 0.01 < pose[0] < card_pick.SLOT_X[1] + 0.01)
+            passed = displacement < 0.005 and tilt < 3.0 and in_slot
+            deck[label] = {"pass": bool(passed), "displacement_m": displacement,
+                           "tilt_deg": tilt, "in_slot": in_slot}
+            deck_ok &= passed
+        fingers = rig.s0.joint_q.numpy()[7:9]
+        self.had_closed_grasp |= bool(np.max(fingers) <= 0.025)
+        released = bool(self.had_closed_grasp and np.min(fingers) >= 0.039)
+        # Original OPEN_W=0.04 m, with the same 1 mm release tolerance used
+        # by the independent Allen-key evaluator.
+        link = body_q[labels.index("fr3/fr3_link7"), :3]
+        if released and self.release_link_position is None:
+            self.release_link_position = link.copy()
+        retreat = (0.0 if self.release_link_position is None else
+                   float(np.linalg.norm(link - self.release_link_position)))
+        checks = {
+            "single_card_on_table": {"pass": card_ok,
+                                     "card_position_m": picked[:3].tolist()},
+            "deck_remains_neat": {"pass": bool(deck_ok), "cards": deck,
+                                  "max_displacement_m": 0.005, "max_tilt_deg": 3.0},
+            "released": {"pass": released, "finger_dof_m": fingers.tolist()},
+            "robot_retreat": {"pass": retreat >= 0.05, "value_m": retreat,
+                              "threshold_m": 0.05}}
+        physical = bool(all(value["pass"] for value in checks.values()))
+        return {"status": "physical_pass" if physical else "physical_fail",
+                "success": None, "strict_success": None, "physical_success": physical,
+                "source": "independent_physical_state", "timestamp": float(timestamp),
+                "checks": checks,
+                "unsupported_checks": [
+                    "post-release robot/object contact history",
+                    "complete rollout no-cam-out and direct-contact integrity histories"],
+                "reason": ("physical state subset passed; not original appendix QA"
+                           if physical else "one or more physical checks failed")}
+
+
 _compat_evaluator = AllenKeyPolicyEvaluator()
 
 

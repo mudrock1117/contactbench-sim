@@ -16,7 +16,8 @@ from force_bench.data.timebase import (ActionChunkExecutor, PolicyTimeConfig,
                                        resample_joint_actions)
 from force_bench.data.compare_wrist_mounts import (DEFAULT_CANDIDATES, load_candidates,
                                                     load_full_states)
-from force_bench.policy.evaluation import AllenKeyPolicyEvaluator
+from force_bench.policy.evaluation import (AllenKeyPolicyEvaluator,
+                                           CardRetrievalPolicyEvaluator)
 from force_bench.tactile.rig import (CASE_FACE_H, FINGERTIP_Z_END, GEL_PAD_H,
                                      GEL_PAD_W, LONG_ALONG_FINGER, GelSightRig,
                                      case_tip_align_extension_m)
@@ -246,4 +247,28 @@ def test_allen_physical_success_requires_release_retreat_and_stopped_window():
         report = evaluator(None, rig, timestamp)
     assert report["physical_success"] is True
     assert report["strict_success"] is None
+
+
+def test_card_evaluator_keeps_strict_success_null_for_physical_subset():
+    labels = ["card_picked", "card_a", "card_b", "card_c", "fr3/fr3_link7"]
+    poses = np.array([
+        [-0.03, 0, 0.04, 0, 0, 0, 1],
+        [-0.03, 0, 0.04, 0, 0, 0, 1],
+        [-0.03, 0, 0.04, 0, 0, 0, 1],
+        [-0.03, 0, 0.04, 0, 0, 0, 1],
+        [0, 0, 0.2, 0, 0, 0, 1]], dtype=float)
+    joints = np.zeros(9); joints[7:9] = 0.02
+    rig = SimpleNamespace(model=SimpleNamespace(body_label=labels),
+                          s0=SimpleNamespace(body_q=Array(poses), joint_q=Array(joints)))
+    evaluator = CardRetrievalPolicyEvaluator(); evaluator.reset(None, rig, 0.0)
+    evaluator(None, rig, 0.1)  # observes a genuinely closed grasp
+    poses[0] = [0.10, 0, 0.003, 0, -np.sqrt(0.5), 0, np.sqrt(0.5)]
+    joints[7:9] = 0.04
+    rig.s0.body_q.assign(poses); rig.s0.joint_q.assign(joints)
+    evaluator(None, rig, 0.2)  # release location
+    poses[4, 0] = 0.06; rig.s0.body_q.assign(poses)
+    report = evaluator(None, rig, 0.3)
+    assert report["physical_success"]
+    assert report["strict_success"] is None and report["success"] is None
+    assert report["unsupported_checks"]
 

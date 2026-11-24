@@ -48,6 +48,9 @@ usd = ["usd-core>=24", "newton-usd-schemas==0.4.1"]
 # viewer deps) and the browser page's WebSocket server
 teleop = ["pyglet>=2.1.6,<3", "imgui-bundle>=1.92", "websockets>=12"]
 dev = ["pytest>=8", "ruff>=0.6"]
+# Installed only in the isolated contactbench-dp environment.  The simulator
+# environment deliberately remains free of PyTorch and diffusers.
+dp = ["torch>=2.5", "torchvision>=0.20", "diffusers>=0.31", "pytest>=8"]
 
 [project.scripts]
 force-bench = "force_bench.cli:main"
