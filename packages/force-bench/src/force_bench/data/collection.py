@@ -221,6 +221,13 @@ class RigCollector:
                                            "Nonzero robot velocity/feedforward commands require corresponding action support."],
                     "extra_action_fields": {"action_target_velocity": "robot joint target velocity rad/s (7), m/s (2)",
                                             "action_feedforward": "robot joint torque N m (7), force N (2)"}}
+        metadata["eef_action_fields"] = {
+            "action_anchor_tcp_pose_world_xyzw": "measured command-start TCP pose (m, xyzw)",
+            "action_tcp_target_world_xyzw": "FK of exact recorded 9D target (m, xyzw)",
+            "action_anchor_gripper_width_m": "measured absolute width (m)",
+            "action_gripper_width_m": "commanded absolute width (m)",
+            "conversion": "10D is target relative to one policy-chunk anchor; no state-delta substitution",
+        }
         from .task_language import task_instruction
         metadata["language_instruction"] = task_instruction(metadata["task"])
         metadata["language_semantics"] = "task-only instruction; contains no state, phase, or outcome"
@@ -262,7 +269,16 @@ class RigCollector:
         for output, field in (("action_target_velocity", "joint_target_qd"), ("action_feedforward", "joint_f")):
             values = getattr(self.rig.control, field, None)
             extra[output] = np.zeros(ROBOT_DOF, dtype=np.float32) if values is None else _numpy(values)[:ROBOT_DOF].copy()
-        self.pending = robot_action(self.rig), extra
+        command = robot_action(self.rig)
+        measured = self.observation.sample()[:ROBOT_DOF]
+        anchor_pose = _fk_tcp_pose(self.rig, measured)
+        target_pose = _fk_tcp_pose(self.rig, command)
+        if anchor_pose is not None and target_pose is not None:
+            extra["action_anchor_tcp_pose_world_xyzw"] = anchor_pose
+            extra["action_tcp_target_world_xyzw"] = target_pose
+            extra["action_anchor_gripper_width_m"] = np.float32(measured[7] + measured[8])
+            extra["action_gripper_width_m"] = np.float32(command[7] + command[8])
+        self.pending = command, extra
 
     def after_step(self, timestamp, extra=None):
         """``extra``: further per-step arrays measured after the step (for example contact forces)."""

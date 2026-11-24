@@ -11,3 +11,6 @@ dist/
 # local, optional: GelSight's GPL-3.0 housing CAD (see packages/hydrogel/src/hydrogel/data/gs_mini/PROVENANCE.md)
 packages/hydrogel/src/hydrogel/data/gs_mini/gsmini_shell.obj
 imgui.ini
+
+# pinned upstream source checkouts; versions live in upstreams.lock.yaml
+third_party/

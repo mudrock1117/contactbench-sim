@@ -12,9 +12,8 @@ class PolicyTimeConfig:
     action_horizon: int = 16
 
     def __post_init__(self):
-        ratio = self.physics_hz / self.policy_hz
-        if self.physics_hz <= 0 or self.policy_hz <= 0 or not np.isclose(ratio, round(ratio)):
-            raise ValueError("physics_hz/policy_hz must be a positive integer")
+        if self.physics_hz <= 0 or self.policy_hz <= 0 or self.policy_hz > self.physics_hz:
+            raise ValueError("frequencies must be positive and policy_hz <= physics_hz")
         if self.observation_horizon < 1 or self.action_horizon < 1:
             raise ValueError("horizons must be positive")
 
@@ -24,7 +23,32 @@ class PolicyTimeConfig:
 
     @property
     def physics_frames_per_action(self):
-        return int(round(self.physics_hz / self.policy_hz))
+        ratio = self.physics_hz / self.policy_hz
+        if not np.isclose(ratio, round(ratio)):
+            raise ValueError("non-integer rate uses physics_frames_for_step()")
+        return int(round(ratio))
+
+    def physics_frames_for_step(self, step):
+        """Causal integer frame span; 60/24 Hz alternates 3,2 frames."""
+        if int(step) != step or step < 0:
+            raise ValueError("step must be a nonnegative integer")
+        ratio = self.physics_hz / self.policy_hz
+        edge = lambda value: int(np.floor(value * ratio + 0.5))
+        return edge(step + 1) - edge(step)
+
+
+class PolicyFrameScheduler:
+    """Online counterpart of timestamp sampling, including rational rates."""
+    def __init__(self, config):
+        self.config, self.step = config, 0
+
+    def pop(self):
+        frames = self.config.physics_frames_for_step(self.step)
+        self.step += 1
+        return frames
+
+    def reset(self):
+        self.step = 0
 
 
 def causal_indices(source_timestamps, query_timestamps):

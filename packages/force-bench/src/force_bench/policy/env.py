@@ -16,9 +16,11 @@ from force_bench.data.episode import atomic_json
 from force_bench.data.collection import read_tactile, tactile_metadata
 from force_bench.data.rgb import LiveRGBCamera
 from force_bench.data.task_language import task_instruction
-from force_bench.data.timebase import ActionChunkExecutor, PolicyTimeConfig
+from force_bench.data.timebase import ActionChunkExecutor, PolicyTimeConfig, PolicyFrameScheduler
 from force_bench.robot.actions import (EndEffectorActionAdapter, EndEffectorActionConfig,
                                        JointPositionActionAdapter)
+from force_bench.robot.eef_action import (RelativeEEF10DActionAdapter, pose_xyzw_to_matrix,
+                                          relative_eef_history)
 
 
 @dataclass(frozen=True)
@@ -41,8 +43,8 @@ class PolicyEnvConfig:
     def __post_init__(self):
         if self.control_hz <= 0 or self.max_steps < 1:
             raise ValueError("control_hz and max_steps must be positive")
-        if self.action_type not in ("joint_position", "eef_delta"):
-            raise ValueError("action_type must be joint_position or eef_delta")
+        if self.action_type not in ("joint_position", "eef_delta", "eef_relative_10d"):
+            raise ValueError("action_type must be joint_position, eef_delta, or eef_relative_10d")
         if self.visual_mode not in ("none", "fixed", "wrist", "both"):
             raise ValueError("visual_mode must be none, fixed, wrist, or both")
         if self.rgb_fps <= 0 or self.observation_horizon < 1:
@@ -100,11 +102,11 @@ class ClosedLoopPolicyEnv:
         if self.config.time_config is not None and not np.isclose(
                 self.rig.fps, self.config.time_config.physics_hz):
             raise ValueError("Rig state rate must match PolicyTimeConfig.physics_hz")
-        ratio = float(self.rig.fps) / self.config.control_hz
-        self.frames_per_action = int(round(ratio))
-        if self.frames_per_action < 1 or not np.isclose(ratio, self.frames_per_action):
-            raise ValueError("control_hz must divide the Rig state rate exactly")
-        self.control_dt = self.frames_per_action / float(self.rig.fps)
+        timing = self.config.time_config or PolicyTimeConfig(
+            physics_hz=float(self.rig.fps), policy_hz=self.config.control_hz,
+            observation_horizon=self.config.observation_horizon, action_horizon=16)
+        self.frame_scheduler = PolicyFrameScheduler(timing)
+        self.control_dt = timing.policy_dt
         self.observer = RigObservation(self.rig)
         self.tcp_adapter = None
         if hasattr(self.rig, "ik"):
@@ -113,10 +115,14 @@ class ClosedLoopPolicyEnv:
                 EndEffectorActionConfig(), workspace_low=np.asarray(self.scene.env_lo, float),
                 workspace_high=np.asarray(self.scene.env_hi, float))
             self.tcp_adapter = EndEffectorActionAdapter(self.rig, eef_config)
-        if self.config.action_type == "eef_delta" and self.tcp_adapter is None:
-            raise ValueError("eef_delta requires a scene with FrankaIK")
-        self.action_adapter = (JointPositionActionAdapter(self.rig)
-                               if self.config.action_type == "joint_position" else self.tcp_adapter)
+        if self.config.action_type in ("eef_delta", "eef_relative_10d") and self.tcp_adapter is None:
+            raise ValueError("EEF actions require a scene with FrankaIK")
+        if self.config.action_type == "joint_position":
+            self.action_adapter = JointPositionActionAdapter(self.rig)
+        elif self.config.action_type == "eef_delta":
+            self.action_adapter = self.tcp_adapter
+        else:
+            self.action_adapter = RelativeEEF10DActionAdapter(self.rig, eef_config)
         self.t, self.steps, self.done, self.last_error = 0.0, 0, False, None
         reset_evaluator = getattr(self.evaluator, "reset", None)
         if reset_evaluator is not None:
@@ -201,6 +207,11 @@ class ClosedLoopPolicyEnv:
         history = [history[0]] * (self.config.observation_horizon - len(history)) + history
         result = dict(current)
         result["history"] = history
+        if self.config.action_type == "eef_relative_10d":
+            anchor = pose_xyzw_to_matrix(current["tcp_pose_world_xyzw"])
+            poses = np.stack([pose_xyzw_to_matrix(item["tcp_pose_world_xyzw"]) for item in history])
+            widths = np.asarray([item["robot_joint_position"][7:9].sum() for item in history])
+            result["eef_relative_history"] = relative_eef_history(poses, widths, anchor)
         return result
 
     def _sample_tactile(self, *, force=False):
@@ -268,7 +279,8 @@ class ClosedLoopPolicyEnv:
                     info["evaluation"] = failure
                     self._finish_collection(failure)
                 return observation, 0.0, self.done, False, info
-            for _ in range(self.frames_per_action):
+            frames_this_action = self.frame_scheduler.pop()
+            for _ in range(frames_this_action):
                 if self.collector is not None:
                     self.collector.after_control()
                 self._physics_frame()
@@ -324,6 +336,8 @@ class ClosedLoopPolicyEnv:
         if self.config.time_config is not None and len(actions) > self.config.time_config.action_horizon:
             raise ValueError("predicted chunk exceeds PolicyTimeConfig.action_horizon")
         self.chunk_executor.replan(actions)
+        if self.config.action_type == "eef_relative_10d":
+            self.action_adapter.set_chunk_anchor(self.t)
 
     def step_next(self):
         """Execute exactly the next action from the current prediction chunk."""

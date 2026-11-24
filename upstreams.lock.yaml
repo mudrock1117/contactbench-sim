@@ -1,0 +1,18 @@
+version: 1
+upstreams:
+  diffusion_policy:
+    repository: https://github.com/real-stanford/diffusion_policy.git
+    commit: 5ba07ac
+    path: third_party/diffusion_policy
+  reactive_diffusion_policy:
+    repository: https://github.com/xiaoxiaoxh/reactive_diffusion_policy.git
+    commit: 8ed82a3
+    path: third_party/reactive_diffusion_policy
+  openpi:
+    repository: https://github.com/Physical-Intelligence/openpi.git
+    commit: 15a9616
+    path: third_party/openpi
+  ftp1_policy:
+    repository: https://github.com/michaelyuancb/ftp1-policy.git
+    commit: 89fa681
+    path: third_party/ftp1-policy
