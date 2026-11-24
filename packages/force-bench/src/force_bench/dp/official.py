@@ -36,7 +36,9 @@ def workspace_from_yaml(path):
     from omegaconf import OmegaConf
     from hydra.utils import get_class
     cfg = OmegaConf.load(path)
-    workspace = get_class(cfg._target_)(cfg)
+    output_dir = Path(OmegaConf.to_container(cfg.multi_run, resolve=True)["run_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    workspace = get_class(cfg._target_)(cfg, output_dir=str(output_dir))
     expected = "diffusion_policy.workspace.train_diffusion_unet_hybrid_workspace"
     if not workspace.__class__.__module__.startswith(expected):
         raise TypeError(f"configuration did not create the official workspace: {workspace!r}")
@@ -46,3 +48,21 @@ def run_workspace(path):
     workspace = workspace_from_yaml(path)
     workspace.run()
     return workspace
+
+
+def validate_checkpoint_contract(cfg, payload):
+    """Reject a checkpoint whose model/time contract differs from runtime YAML."""
+    saved = payload.get("cfg")
+    if saved is None:
+        raise ValueError("official checkpoint has no saved cfg")
+    fields = ("horizon", "n_obs_steps", "n_action_steps")
+    for field in fields:
+        if int(saved[field]) != int(cfg[field]):
+            raise ValueError(f"checkpoint {field}={saved[field]} but config requests {cfg[field]}")
+    if list(saved.shape_meta.action.shape) != list(cfg.shape_meta.action.shape):
+        raise ValueError("checkpoint action shape differs from config")
+    from omegaconf import OmegaConf
+    saved_obs = OmegaConf.to_container(saved.shape_meta.obs, resolve=True)
+    runtime_obs = OmegaConf.to_container(cfg.shape_meta.obs, resolve=True)
+    if saved_obs != runtime_obs:
+        raise ValueError("checkpoint observation shapes differ from config")

@@ -59,16 +59,19 @@ Smoke and paper runs:
 Paper config is wrist RGB 3x240x320, 12 Hz, obs 2, horizon 16, action 10D,
 batch 64, LR 1e-4, cosine, warmup 500 and 501 epochs from scratch.
 Single-episode overfit uses every window; its validation is diagnostic, not an
-independent test split.
+independent test split. The upstream-compatible offline runner deliberately returns
+metrics only and never starts Newton from the training workspace. Images are divided
+by 255 and receive an explicit identity normalizer; action and agent_pos use the
+official LinearNormalizer.
 
 Prediction:
 
-    python -m force_bench.dp.official_predict --config packages/force-bench/config/dp/official_paper.yaml --checkpoint outputs/dp/official_card/checkpoints/latest.ckpt --data outputs/datasets/card_multimodal_a4
+    TB_DP_DATA=outputs/datasets/card_multimodal_a4 python -m force_bench.dp.official_predict --config packages/force-bench/config/dp/official_smoke.yaml --checkpoint outputs/dp/official_card_smoke/checkpoints/latest.ckpt
 
 Training-side inference server:
 
     conda activate contactbench-dp
-    python -m force_bench.dp.official_server --config packages/force-bench/config/dp/official_paper.yaml --checkpoint outputs/dp/official_card/checkpoints/latest.ckpt --device cuda:0
+    python -m force_bench.dp.official_server --config packages/force-bench/config/dp/official_smoke.yaml --checkpoint outputs/dp/official_card_smoke/checkpoints/latest.ckpt --device cuda:0
 
 Simulation-side closed loop:
 
@@ -76,7 +79,12 @@ Simulation-side closed loop:
     python -m force_bench.dp.run_official_closed_loop --policy-hz 12 --execution-horizon 8 --max-steps 600
 
 The existing Card evaluator and TCP/NPZ transport are reused. No expert controller
-or expert auxiliary command is injected.
+or expert auxiliary command is injected. Upstream predicts a 16-step action_pred,
+then returns exactly action_pred[1:9], so each closed-loop replan executes exactly
+eight 10D actions. Dataset index 1 is the command at the current observation and
+every target in the sequence is expressed against that current fixed TCP anchor.
+Episodes with missing/non-finite fields or nonzero recorded velocity/feedforward
+controls are rejected rather than silently converted.
 
 ## Checks
 

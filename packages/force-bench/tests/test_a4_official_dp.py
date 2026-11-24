@@ -32,3 +32,57 @@ def test_relative_history_is_10d_and_anchored_at_current():
 def test_24hz_noninteger_ratio_rejects_legacy_integer_property():
     with pytest.raises(ValueError,match="physics_frames_for_step"):
         _=PolicyTimeConfig(60,24,2,16).physics_frames_per_action
+
+
+def test_official_action_offset_places_current_at_index_one():
+    from force_bench.dp.official_contract import official_action_query_times
+    query=official_action_query_times(2.0,policy_hz=12,horizon=16,n_obs_steps=2)
+    assert query.shape==(16,)
+    assert query[1]==pytest.approx(2.0)
+    assert query[0]<2.0 and np.all(np.diff(query)>0)
+
+def test_eef_field_validation_rejects_missing_and_auxiliary_controls():
+    from force_bench.dp.official_contract import validate_eef_episode_arrays
+    count=3
+    arrays={
+        "action_anchor_tcp_pose_world_xyzw":np.ones((count,7)),
+        "action_tcp_target_world_xyzw":np.ones((count,7)),
+        "action_anchor_gripper_width_m":np.ones(count),
+        "action_gripper_width_m":np.ones(count),
+        "action_target_velocity":np.zeros((count,9)),
+        "action_feedforward":np.zeros((count,9)),
+    }
+    assert validate_eef_episode_arrays(arrays,count)
+    arrays["action_feedforward"][1,0]=0.01
+    with pytest.raises(ValueError,match="nonzero"):
+        validate_eef_episode_arrays(arrays,count)
+    del arrays["action_gripper_width_m"]
+    with pytest.raises(ValueError,match="missing exact command fields"):
+        validate_eef_episode_arrays(arrays,count)
+
+def test_official_workspace_configs_cover_upstream_contract():
+    from pathlib import Path
+    import yaml
+    root=Path(__file__).resolve().parents[3]
+    for name in ("official_smoke.yaml","official_paper.yaml"):
+        path=root/"packages/force-bench/config/dp"/name
+        text=path.read_text()
+        assert r"\${" not in text
+        cfg=yaml.safe_load(text)
+        assert cfg["task"]["env_runner"]["_target_"].endswith("ContactBenchOfflineImageRunner")
+        assert cfg["training"]["tqdm_interval_sec"]>0
+        assert cfg["checkpoint"]["save_last_ckpt"] is True
+        assert "save_last_snapshot" in cfg["checkpoint"]
+        assert cfg["n_obs_steps"]==2 and cfg["horizon"]==16 and cfg["n_action_steps"]==8
+        assert cfg["task"]["dataset"]["policy_hz"]==12
+    smoke=yaml.safe_load((root/"packages/force-bench/config/dp/official_smoke.yaml").read_text())
+    assert smoke["logging"]["mode"] in ("disabled","offline")
+
+def test_official_runner_is_upstream_base_runner_when_available(tmp_path):
+    try:
+        from force_bench.dp.official_runner import ContactBenchOfflineImageRunner
+        from diffusion_policy.env_runner.base_image_runner import BaseImageRunner
+    except (ImportError,FileNotFoundError):
+        pytest.skip("pinned upstream training environment is not installed")
+    assert issubclass(ContactBenchOfflineImageRunner,BaseImageRunner)
+    assert ContactBenchOfflineImageRunner(tmp_path).run(None)=={"offline_runner":1.0}

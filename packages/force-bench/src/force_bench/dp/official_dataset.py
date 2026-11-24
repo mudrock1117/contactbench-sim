@@ -8,9 +8,11 @@ from force_bench.data.episode import discover_episodes, load_episode
 from force_bench.data.timebase import PolicyTimeConfig, causal_indices
 from force_bench.robot.eef_action import encode_relative_eef, relative_eef_history
 from force_bench.dp.official import activate_upstream
+from force_bench.dp.official_contract import (official_action_query_times,
+                                               validate_eef_episode_arrays)
 activate_upstream()
 from diffusion_policy.dataset.base_dataset import BaseImageDataset
-from diffusion_policy.model.common.normalizer import LinearNormalizer
+from diffusion_policy.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 
 def _pose_matrix(xyzw):
     xyzw=np.asarray(xyzw,dtype=np.float64); p=xyzw[:3]; x,y,z,w=xyzw[3:]
@@ -36,17 +38,22 @@ class ContactBenchOfficialDPDataset(BaseImageDataset):
         if not paths: raise ValueError(f"no episodes under {data_path}")
         self.base=EpisodeWindowDataset(paths,spec); self.episodes={}
         for path in paths:
-            ep=load_episode(path); missing=[k for k in self.REQUIRED if k not in ep.arrays]
-            if missing:
-                raise ValueError(f"{path}: missing exact 10D fields {missing}; re-collect with A4 fields. "
-                                 "Measured joint deltas are not expert EEF commands.")
+            ep=load_episode(path)
+            try:
+                validate_eef_episode_arrays(ep.arrays, len(ep["actions"]))
+            except ValueError as error:
+                raise ValueError(f"{path}: {error}; measured state deltas are not substituted") from error
             self.episodes[str(ep.metadata["episode_id"])]=ep
         self.timing=timing; self.horizon=int(horizon)
     def __len__(self): return len(self.base)
     def __getitem__(self,index):
         sample=self.base[index]; ep=self.episodes[str(sample["episode_id"])]
         current=float(sample["timestamp"][-1])
-        query=current+(np.arange(self.horizon)-(self.timing.observation_horizon-1))*self.timing.policy_dt
+        query=official_action_query_times(
+            current, policy_hz=self.timing.policy_hz, horizon=self.horizon,
+            n_obs_steps=self.timing.observation_horizon)
+        if not np.isclose(query[self.timing.observation_horizon-1], current):
+            raise RuntimeError("official action index is not anchored at current observation")
         idx=causal_indices(ep["timestamps"][:-1],query)
         if np.any(idx<0) or np.any(idx>=len(ep["actions"])):
             raise IndexError("official action horizon crosses episode boundary")
@@ -71,6 +78,7 @@ class ContactBenchOfficialDPDataset(BaseImageDataset):
         normalizer=LinearNormalizer()
         normalizer.fit({"action":np.concatenate(actions),"agent_pos":np.concatenate(states)},
                        last_n_dims=1,mode=mode,**kwargs)
-        normalizer["wrist_rgb"].set_identity(); return normalizer
+        normalizer["wrist_rgb"] = SingleFieldLinearNormalizer.create_identity()
+        return normalizer
     def get_all_actions(self):
         return torch.cat([self[i]["action"] for i in range(len(self))],dim=0)
