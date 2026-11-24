@@ -87,14 +87,32 @@ class ConditionalUnet1D(nn.Module):
         middle = dimensions[-1]
         self.middle = nn.ModuleList((block(middle, middle), block(middle, middle)))
         self.up = nn.ModuleList()
-        for dim_in, dim_out in reversed(pairs[1:]):
-            self.up.append(nn.ModuleList((block(dim_out * 2, dim_in), block(dim_in, dim_in),
-                nn.ConvTranspose1d(dim_in, dim_in, 4, stride=2, padding=1))))
+        self.up_specs = []
+        current_channels = down_dims[-1]
+        # Consume every encoder feature, deepest to shallowest.  The first
+        # residual block is constructed from the REAL concatenated channel
+        # count rather than inferring it from a reversed down-path pair.
+        for level in reversed(range(len(down_dims))):
+            skip_channels = down_dims[level]
+            output_channels = skip_channels
+            next_channels = down_dims[level - 1] if level > 0 else down_dims[0]
+            upsample = (nn.ConvTranspose1d(output_channels, next_channels, 4,
+                                           stride=2, padding=1)
+                        if level > 0 else nn.Identity())
+            self.up.append(nn.ModuleList((
+                block(current_channels + skip_channels, output_channels),
+                block(output_channels, output_channels), upsample)))
+            self.up_specs.append((current_channels, skip_channels,
+                                  output_channels, next_channels))
+            current_channels = next_channels
         self.final = nn.Sequential(Conv1DBlock(down_dims[0], down_dims[0], kernel_size),
                                    nn.Conv1d(down_dims[0], action_dim, 1))
 
     def forward(self, sample, timestep, global_condition):
         value = sample.transpose(1, 2)
+        if global_condition.ndim != 2 or global_condition.shape[0] != value.shape[0]:
+            raise ValueError("global_condition must be [B,condition_dim]")
+        global_condition = global_condition.to(device=value.device, dtype=value.dtype)
         if not torch.is_tensor(timestep):
             timestep = torch.tensor([timestep], device=value.device, dtype=torch.long)
         if timestep.ndim == 0:
@@ -110,9 +128,15 @@ class ConditionalUnet1D(nn.Module):
             value = layer(value, condition)
         for first, second, upsample in self.up:
             skip = skips.pop()
+            # Strided convolution can differ by one sample for odd horizons;
+            # align time before concatenating without changing channels.
             if value.shape[-1] != skip.shape[-1]:
                 value = F.interpolate(value, size=skip.shape[-1], mode="nearest")
-            value = upsample(second(first(torch.cat((value, skip), dim=1), condition), condition))
+            value = torch.cat((value, skip), dim=1)
+            value = second(first(value, condition), condition)
+            value = upsample(value)
+        if skips:
+            raise RuntimeError("U-Net forward did not consume every skip feature")
         return self.final(value).transpose(1, 2)
 
 

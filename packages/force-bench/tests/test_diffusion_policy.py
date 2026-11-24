@@ -10,7 +10,8 @@ from force_bench.data.timebase import ActionChunkExecutor
 from force_bench.dp.checkpoint import load_policy, save_checkpoint
 from force_bench.dp.config import DPConfig
 from force_bench.dp.data import TorchWindowDataset, window_spec
-from force_bench.dp.model import DiffusionPolicy, EMA
+from force_bench.dp.model import (ConditionalUnet1D, DiffusionPolicy, EMA,
+                                  ImageEncoder)
 
 
 def tiny_config():
@@ -39,6 +40,50 @@ def test_model_shape_loss_gradient_and_iterative_ddpm():
     predicted = model.predict_actions(proprio, images, inference_steps=4)
     assert predicted.shape == (2, 16, 9)
     assert torch.isfinite(predicted).all()
+
+
+@pytest.mark.parametrize("down_dims", [(16, 32, 64), (256, 512, 1024)])
+def test_conditional_unet_skip_channels_forward_and_backward(down_dims):
+    # kernel_size=1 keeps the production channel topology while making the
+    # 256/512/1024 CPU regression reasonably small.
+    model = ConditionalUnet1D(9, global_condition_dim=24,
+                              diffusion_embed_dim=16, down_dims=down_dims,
+                              kernel_size=1)
+    sample = torch.randn(1, 16, 9, requires_grad=True)
+    condition = torch.randn(1, 24, requires_grad=True)
+    output = model(sample, torch.tensor([3]), condition)
+    assert output.shape == (1, 16, 9)
+    assert len(model.up_specs) == len(down_dims)
+    for spec, modules in zip(model.up_specs, model.up):
+        current, skip, output_channels, next_channels = spec
+        first, _, upsample = modules
+        assert first.blocks[0].net[0].in_channels == current + skip
+        assert first.blocks[0].net[0].out_channels == output_channels
+        if isinstance(upsample, torch.nn.ConvTranspose1d):
+            assert upsample.in_channels == output_channels
+            assert upsample.out_channels == next_channels
+        else:
+            assert output_channels == next_channels == down_dims[0]
+    output.square().mean().backward()
+    assert sample.grad is not None and torch.isfinite(sample.grad).all()
+    assert condition.grad is not None and torch.isfinite(condition.grad).all()
+    assert all(parameter.grad is not None and torch.isfinite(parameter.grad).all()
+               for parameter in model.parameters() if parameter.requires_grad)
+
+
+def test_resnet_and_ddpm_shapes_preserve_device():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    encoder = ImageEncoder(resize=32, pretrained=False).to(device)
+    images = torch.randint(0, 256, (2, 3, 40, 48), dtype=torch.uint8,
+                           device=device)
+    features = encoder(images)
+    assert features.shape == (2, 512) and features.device == device
+    config = tiny_config(); model = DiffusionPolicy(config).to(device)
+    clean = torch.randn(2, 16, 9, device=device)
+    noise = torch.randn_like(clean)
+    timesteps = torch.tensor([0, 7], device=device)
+    noisy = model.scheduler.add_noise(clean, noise, timesteps)
+    assert noisy.shape == clean.shape and noisy.device == device
 
 
 def test_fixed_wrist_and_both_visual_modes_build_real_conditions():
