@@ -121,7 +121,8 @@ def _list_tasks() -> None:
         title = s.appendix_task if s.appendix_task != last else ""
         last = s.appendix_task
         flag = ("  [scene only: no scripted policy]" if not s.scripted else "") + \
-            ("  [TB_GELSIGHT=1]" if s.gelsight else "")
+            ("  [TB_GELSIGHT=1]" if s.gelsight else
+             ("  [TB_GELSIGHT=1, unvalidated]" if s.gelsight_capable else ""))
         print(f"{s.number:>3}  {title:34s} {s.name:42s} {s.variant}{flag}")
     print("\nNot in simulation: tasks 1, 3, 7, 8, 10, 11, 12 and 21 (docs/tasks.md#tasks-not-included)")
 
@@ -141,7 +142,9 @@ def _info(name: str) -> None:
              "none: a scene for teleoperation (force-bench teleop-ui --scene " + s.name + ") or a policy of "
              "your own; force-bench run records the scene with the arm holding still"),
             ("deviations", s.notes or "none documented"),
-            ("tactile", "validated with TB_GELSIGHT=1" if s.gelsight else "bare gripper only"),
+            ("tactile", ("validated with TB_GELSIGHT=1" if s.gelsight else
+                         ("integrated; runtime validation pending" if s.gelsight_capable
+                          else "bare gripper only"))),
             ("embodiment", _embodiments_of(s)),
             ("outputs", f"outputs/appendix_tasks/{s.name}/ " + ("(verdict: appendix_qa.json)" if s.scripted
                                                                 else "(scene.json: the fill and the criterion's state)"))]

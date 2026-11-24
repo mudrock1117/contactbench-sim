@@ -206,6 +206,7 @@ from force_bench.geometry import subdiv_processed as subdiv, world_T
 from force_bench.paths import ASSETS_ROOT
 from force_bench.recorder import RolloutRecorder
 from force_bench.data.rgb import wrist_mount_from_tcp
+import force_bench.tactile.task as GS
 from force_bench.rig import make_solver, set_finger_effort_limit
 from force_bench.robot.franka import down_grasp_quat
 from force_bench.tasks.screwdriver import DriveContacts
@@ -273,7 +274,7 @@ SQUEEZE = _env("AK_SQUEEZE", 1.5 * MM)          # ~9-10 N/pad realised at 8 kN/m
 # square pinched across flats resists a roll torque with a normal-force couple
 # of at most F x 5 mm, so 30 mN.m needs > 6 N/pad)
 OPEN_EXTRA = 8.0 * MM
-F_TOUCH_DOF = KEY_HALF + PAD_FACE_OFF
+F_TOUCH_DOF = KEY_HALF + PAD_FACE_OFF + GS.finger_offset()
 F_CLOSE_DOF = F_TOUCH_DOF - SQUEEZE
 F_OPEN_DOF = F_TOUCH_DOF + OPEN_EXTRA
 GRIP_BAND = (7.0, 14.0)        # N, mean pad force: the admittance trim only acts
@@ -743,10 +744,14 @@ def run(mode: str):
     assert mode in ("tighten", "loosen")
     name = f"{mode}_screw_with_allen_key_from_table"
     stop_at = os.environ.get("AK_STOP", "")
-    rig = appendix_rig(name)
+    rig = (appendix_rig(name, rig_cls=GS.GelSightRig, gel_config=GS.GEL_CFG)
+           if GS.GS_ON else appendix_rig(name))
     rig.hard_joint_limits = True              # the seat is a HARD stop
     rig.solver_options["impratio"] = IMPRATIO
     h = build_scene(rig, mode)
+    if GS.GS_ON:
+        GS.hydroelastic(rig, "allen_key")
+        GS.mount(rig)
     b = rig.builder
     c_K = h["c_K"]
     T_K0 = h["T_K0"]
@@ -854,6 +859,13 @@ def run(mode: str):
         "turn_min_deg": float(TIGHT_TURN_MIN_DEG),
         "loosen_min_deg": float(LOOSENED_MIN_DEG),
         "lead_mm_per_rad": float(LEAD / MM),
+        "open_finger_dof_m": float(F_OPEN_DOF),
+        "closed_finger_dof_m": float(F_CLOSE_DOF),
+        "link7_body_index": int(rig.body_index("fr3/fr3_link7")),
+        "T_link7_tcp": np.asarray(T_off, float).tolist(),
+        "retreat_min_m": 0.050,
+        "robot_stop_speed_m_s": 0.005,
+        "robot_stop_duration_s": float(T_STILL_SETTLE),
     }
 
     key_lbls = ["key_tip", "key_leg", "key_bend"]

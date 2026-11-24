@@ -12,7 +12,7 @@ from force_bench.data.timebase import (ActionChunkExecutor, PolicyTimeConfig,
                                        resample_joint_actions)
 from force_bench.data.compare_wrist_mounts import (DEFAULT_CANDIDATES, load_candidates,
                                                     load_full_states)
-from force_bench.policy.evaluation import allen_key_state_evaluation
+from force_bench.policy.evaluation import AllenKeyPolicyEvaluator
 
 
 class Array:
@@ -127,12 +127,47 @@ def test_action_chunks_are_consumed_once_and_replanning_replaces_tail():
 def test_language_has_no_outcome_and_allen_qa_fails_closed_without_expert_evidence():
     instruction = task_instruction("tighten_screw_with_allen_key_from_table")
     assert "tighten" in instruction.lower() and "success" not in instruction.lower()
+    spec = {"kind": "allen_key", "mode": "tighten", "screw_q_index": 9,
+            "screw_z_index": 10, "start_deg": -615, "turn_min_deg": 600,
+            "loosen_min_deg": 180, "lead_mm_per_rad": 2.34,
+            "open_finger_dof_m": 0.012, "closed_finger_dof_m": 0.003,
+            "link7_body_index": 0, "T_link7_tcp": np.eye(4).tolist(),
+            "retreat_min_m": 0.05, "robot_stop_speed_m_s": 0.005,
+            "robot_stop_duration_s": 0.4}
+    state_q = np.zeros(11); state_q[7:9] = 0.012
     rig = SimpleNamespace(
-        policy_qa_spec={"kind": "allen_key", "mode": "tighten", "screw_q_index": 0,
-                        "screw_z_index": 1, "start_deg": -615, "turn_min_deg": 600,
-                        "loosen_min_deg": 180, "lead_mm_per_rad": 2.34},
-        s0=SimpleNamespace(joint_q=Array([0, 0])))
-    report = allen_key_state_evaluation(None, rig, 2.0)
-    assert report["status"] == "partial" and report["success"] is None
+        policy_qa_spec=spec,
+        model=SimpleNamespace(body_label=["fr3/fr3_link7"]),
+        s0=SimpleNamespace(joint_q=Array(state_q),
+                           body_q=Array([[0, 0, 0, 0, 0, 0, 1]])))
+    report = AllenKeyPolicyEvaluator()(None, rig, 2.0)
+    assert report["strict_success"] is None and report["success"] is None
+    assert report["physical_success"] is False
     assert report["unsupported_checks"]
+
+
+def test_allen_physical_success_requires_release_retreat_and_stopped_window():
+    spec = {"kind": "allen_key", "mode": "tighten", "screw_q_index": 9,
+            "screw_z_index": 10, "start_deg": -615, "turn_min_deg": 600,
+            "loosen_min_deg": 180, "lead_mm_per_rad": 2.34,
+            "open_finger_dof_m": 0.012, "closed_finger_dof_m": 0.003,
+            "link7_body_index": 0, "T_link7_tcp": np.eye(4).tolist(),
+            "retreat_min_m": 0.05, "robot_stop_speed_m_s": 0.005,
+            "robot_stop_duration_s": 0.4}
+    q = np.zeros(11); q[7:9] = 0.003
+    state = SimpleNamespace(joint_q=Array(q),
+                            body_q=Array([[0, 0, 0, 0, 0, 0, 1]]))
+    rig = SimpleNamespace(policy_qa_spec=spec, s0=state,
+                          model=SimpleNamespace(body_label=["fr3/fr3_link7"]))
+    evaluator = AllenKeyPolicyEvaluator()
+    assert not evaluator(None, rig, 0.0)["physical_success"]
+    q[7:9] = 0.012; state.joint_q.assign(q)
+    evaluator(None, rig, 0.1)
+    state.body_q.assign([[0.06, 0, 0, 0, 0, 0, 1]])
+    evaluator(None, rig, 0.2)
+    report = None
+    for timestamp in (0.3, 0.4, 0.5, 0.6, 0.7, 0.8):
+        report = evaluator(None, rig, timestamp)
+    assert report["physical_success"] is True
+    assert report["strict_success"] is None
 

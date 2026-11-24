@@ -73,6 +73,9 @@ class ClosedLoopPolicyEnv:
             scene_factory = lambda: load_scene(scene_name, args=tuple(scene_args))
         self.scene_name, self.scene_factory, self.config = scene_name, scene_factory, config
         self.evaluator = evaluator
+        if self.evaluator is None:
+            from .evaluation import AllenKeyPolicyEvaluator
+            self.evaluator = AllenKeyPolicyEvaluator()
         self.sensors = dict(sensors or {})
         self.collect_dir = None if collect_dir is None else Path(collect_dir)
         self.seed = int(seed)
@@ -115,6 +118,9 @@ class ClosedLoopPolicyEnv:
         self.action_adapter = (JointPositionActionAdapter(self.rig)
                                if self.config.action_type == "joint_position" else self.tcp_adapter)
         self.t, self.steps, self.done, self.last_error = 0.0, 0, False, None
+        reset_evaluator = getattr(self.evaluator, "reset", None)
+        if reset_evaluator is not None:
+            reset_evaluator(self.scene, self.rig, self.t)
         self.rgb_cameras, self._history = {}, []
         self.chunk_executor = ActionChunkExecutor()  # never cross an episode boundary
         names = (["fixed", "wrist"] if self.config.visual_mode == "both"
@@ -225,6 +231,15 @@ class ClosedLoopPolicyEnv:
                 hook()
         self.t += frame_dt
         self.rig.solver.update_contacts(self.rig.contacts, self.rig.s0)
+        # GelSightRig.run normally performs this frame-end sampling.  The
+        # policy environment owns its physics loop, so invoke the identical
+        # sensor path explicitly after contact forces have been updated.
+        sample_gels = getattr(self.rig, "_sample_gels", None)
+        if sample_gels is not None and getattr(self.rig, "gel_sensors", {}):
+            solver_forces = self.rig._gel_solver_forces(self.rig.s0)
+            gel_forces = {}
+            sample_gels(self.rig.s0, frame_dt, gel_forces, solver_forces)
+            self.rig.last_forces.update(gel_forces)
 
     def step(self, action):
         if self.rig is None or self.done:
@@ -243,8 +258,12 @@ class ClosedLoopPolicyEnv:
                         "command_timestamp": command_time, "effective_until": self.t,
                         "truncated": False, "expert_replay_supported": False}
                 if self.done:
-                    self._finish_collection({"status": "failed", "success": False,
-                                             "source": "action_failure", "reason": result.reason})
+                    failure = {"status": "failed", "success": False,
+                               "strict_success": False, "physical_success": False,
+                               "termination_reason": "action_failure",
+                               "source": "action_failure", "reason": result.reason}
+                    info["evaluation"] = failure
+                    self._finish_collection(failure)
                 return observation, 0.0, self.done, False, info
             for _ in range(self.frames_per_action):
                 if self.collector is not None:
@@ -259,8 +278,15 @@ class ClosedLoopPolicyEnv:
             self.steps += 1
             truncated = self.steps >= self.config.max_steps
             evaluation = self._run_evaluator()
-            terminated = evaluation.get("success") is True
+            # A physical subset is useful diagnostics, but is never promoted
+            # to the complete appendix/paper QA result.
+            terminated = evaluation.get("strict_success") is True
             self.done = truncated or terminated
+            if truncated and not terminated:
+                evaluation = dict(evaluation)
+                evaluation.update(status="timeout", source="policy_horizon",
+                                  termination_reason="timeout",
+                                  reason="policy step limit reached")
             observation = self.observe()
             self._history.append(observation)
             self._history = self._history[-self.config.observation_horizon:]
@@ -272,9 +298,6 @@ class ClosedLoopPolicyEnv:
                     "evaluation": evaluation}
             if self.done:
                 outcome = dict(evaluation)
-                if truncated and outcome.get("success") is None:
-                    outcome.update(status="timeout", source="policy_horizon",
-                                   reason=outcome.get("reason", "policy step limit reached"))
                 self._finish_collection(outcome)
                 if getattr(self, "episode_path", None) is not None:
                     atomic_json(Path(self.episode_path) / "policy_evaluation.json", outcome)
@@ -283,11 +306,15 @@ class ClosedLoopPolicyEnv:
             self.last_error, self.done = f"{type(error).__name__}: {error}", True
             if self.collector is not None:
                 self._finish_collection({"status": "failed", "success": False,
+                                         "strict_success": False,
+                                         "physical_success": False,
+                                         "termination_reason": "simulation_exception",
                                          "source": "policy_exception", "reason": self.last_error})
             return self.observe(), 0.0, True, False, {
                 "action_success": False, "reason": self.last_error,
                 "command_timestamp": command_time, "effective_until": self.t,
-                "truncated": False, "expert_replay_supported": False}
+                "truncated": False, "termination_reason": "simulation_exception",
+                "expert_replay_supported": False}
 
     def replan(self, actions):
         """Replace any unexecuted policy chunk; actions are consumed once."""
@@ -308,13 +335,10 @@ class ClosedLoopPolicyEnv:
         return report
 
     def _run_evaluator(self):
-        if self.evaluator is None:
-            from .evaluation import allen_key_state_evaluation
-            report = allen_key_state_evaluation(self.scene, self.rig, self.t)
-        else:
-            report = dict(self.evaluator(self.scene, self.rig, self.t))
-            if not isinstance(report.get("success"), (bool, type(None))):
-                raise ValueError("evaluator success must be bool or None")
+        report = dict(self.evaluator(self.scene, self.rig, self.t))
+        for key in ("success", "strict_success", "physical_success"):
+            if key in report and not isinstance(report[key], (bool, type(None))):
+                raise ValueError(f"evaluator {key} must be bool or None")
         return report
 
     def _finish_collection(self, outcome):

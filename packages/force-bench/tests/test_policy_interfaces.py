@@ -239,6 +239,7 @@ def test_policy_env_timestamps_action_effect_and_truncation():
     assert obs["timestamp"] == pytest.approx(2 / 60)
     assert info["command_timestamp"] == 0
     assert info["effective_until"] == pytest.approx(2 / 60)
+    assert info["evaluation"]["status"] == "timeout"
     np.testing.assert_array_equal(obs["robot_joint_position"], np.ones(9))
     assert env.evaluate()["success"] is None
 
@@ -250,6 +251,18 @@ def test_policy_env_invalid_action_terminates_without_physics_step():
     obs, _, terminated, truncated, info = env.step(np.zeros(7))
     assert terminated and not truncated and obs["timestamp"] == 0
     assert not info["action_success"]
+    assert info["evaluation"]["termination_reason"] == "action_failure"
+
+
+def test_policy_env_reports_simulation_exception_separately():
+    scene = _policy_scene()
+    scene.rig.solver.step = lambda *args: (_ for _ in ()).throw(RuntimeError("solver failed"))
+    env = ClosedLoopPolicyEnv(scene_factory=lambda: scene,
+                              config=PolicyEnvConfig(control_hz=30))
+    env.reset()
+    _, _, terminated, truncated, info = env.step(np.zeros(9))
+    assert terminated and not truncated
+    assert info["termination_reason"] == "simulation_exception"
 
 
 def test_policy_env_repeated_reset_clears_time_history_and_action_chunk():

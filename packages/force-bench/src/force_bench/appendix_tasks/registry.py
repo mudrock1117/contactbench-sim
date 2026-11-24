@@ -34,6 +34,7 @@ class AppendixSpec:
     start: str = ""                 # how the episode starts
     notes: str = ""                 # documented differences from the real-world definition
     gelsight: bool = False          # validated with TB_GELSIGHT=1
+    gelsight_capable: bool = False  # integrated but not yet runtime-validated
     scripted: bool = True           # has a scripted policy and a verdict (False: a scene only)
 
     @property
@@ -106,10 +107,12 @@ APPENDIX: list[AppendixSpec] = [
                  start="ruler on the table, hung by its hole on the hanging board"),
     AppendixSpec("tighten_screw_with_allen_key_from_table", "tighten_screw_with_allen_key_from_table",
                  "Tighten screw with Allen key", 13, "new", skills=(EXTRINSIC, INSERTION),
-                 start="Allen key on the table; picked up, used, put back"),
+                 start="Allen key on the table; picked up, used, put back",
+                 gelsight_capable=True),
     AppendixSpec("loosen_screw_with_allen_key_from_table", "loosen_screw_with_allen_key_from_table",
                  "Loosen screw with Allen key", 14, "new", skills=(EXTRINSIC, INSERTION),
-                 start="Allen key on the table; picked up, used, put back"),
+                 start="Allen key on the table; picked up, used, put back",
+                 gelsight_capable=True),
     # tasks 15 / 16 on the kit block (appendix_tasks/_screwdriver_kit.py); the from-table rows are a start-state variant
     AppendixSpec("tighten_screw_with_screwdriver", "tighten_screw_with_screwdriver",
                  "Tighten screw with screwdriver", 15, "new", skills=(EXTRINSIC, INSERTION),

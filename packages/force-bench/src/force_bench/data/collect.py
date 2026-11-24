@@ -121,7 +121,7 @@ def relocate_artifact_references(artifact_root, old_root, new_root):
 
 def collect_episode(task, output, *, seed=0, gelsight=False, random_start=True):
     spec = _spec(task)
-    if gelsight and not spec.gelsight:
+    if gelsight and not (spec.gelsight or spec.gelsight_capable):
         raise ValueError(f"{task} is not registered as GelSight-capable")
     output = Path(output).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
