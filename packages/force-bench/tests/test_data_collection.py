@@ -127,6 +127,73 @@ def test_collector_captures_command_before_solver_and_actual_next_state(tmp_path
     assert episode["action_feedforward"].shape == (1, 9)
 
 
+
+def test_after_control_records_side_effect_free_eef_fk_for_every_action(tmp_path, monkeypatch):
+    """Exercise the real RigCollector pending-command path, not a helper alone."""
+    monkeypatch.setattr("force_bench.data.collection.provenance", lambda: {})
+    rig = fake_rig()
+
+    class IsolatedIK:
+        def __init__(self):
+            self.cache = np.array([91.0, 92.0])
+            self.calls = []
+
+        def tcp_pose_for_joint_q(self, joint_q):
+            q = np.asarray(joint_q, dtype=float).copy()
+            self.calls.append(q)
+            # Deliberately does not touch cache, rig state, or control.
+            return np.r_[q[:3], 0.0, 0.0, 0.0, 1.0]
+
+    rig.ik = IsolatedIK()
+    collector = RigCollector(rig, tmp_path)
+    cache_before = rig.ik.cache.copy()
+    state_before = rig.s0.joint_q.copy()
+    command0 = rig.control.joint_target_q.copy()
+
+    collector.after_control()
+    np.testing.assert_array_equal(rig.s0.joint_q, state_before)
+    np.testing.assert_array_equal(rig.control.joint_target_q, command0)
+    np.testing.assert_array_equal(rig.ik.cache, cache_before)
+    rig.s0.joint_q += 0.25
+    collector.after_step(1 / 60)
+
+    command1 = rig.control.joint_target_q.copy() + 0.5
+    rig.control.joint_target_q[:] = command1
+    measured1 = rig.s0.joint_q.copy()
+    collector.after_control()
+    np.testing.assert_array_equal(rig.s0.joint_q, measured1)
+    np.testing.assert_array_equal(rig.control.joint_target_q, command1)
+    np.testing.assert_array_equal(rig.ik.cache, cache_before)
+    rig.s0.joint_q += 0.25
+    collector.after_step(2 / 60)
+
+    episode = load_episode(collector.finish())
+    count = len(episode["actions"])
+    assert count == 2 and len(episode["timestamps"]) == count + 1
+    for key, suffix in {
+        "action_anchor_tcp_pose_world_xyzw": (7,),
+        "action_tcp_target_world_xyzw": (7,),
+        "action_anchor_gripper_width_m": (),
+        "action_gripper_width_m": (),
+    }.items():
+        assert episode[key].shape == (count,) + suffix
+        assert np.isfinite(episode[key]).all()
+    np.testing.assert_allclose(
+        episode["action_anchor_tcp_pose_world_xyzw"][:, :3],
+        [state_before[:3], measured1[:3]])
+    np.testing.assert_allclose(
+        episode["action_tcp_target_world_xyzw"][:, :3],
+        [command0[:3], command1[:3]])
+    np.testing.assert_allclose(
+        episode["action_anchor_gripper_width_m"],
+        [state_before[7:9].sum(), measured1[7:9].sum()])
+    np.testing.assert_allclose(
+        episode["action_gripper_width_m"],
+        [command0[7:9].sum(), command1[7:9].sum()])
+    assert episode.metadata["eef_action_fields"]["alignment"].endswith("timestamps[:-1]")
+    assert episode.metadata["eef_action_fields"]["tcp_frame"].startswith("fr3/fr3_hand_tcp")
+    assert len(rig.ik.calls) == 2 * count
+
 def test_tactile_initial_invalid_and_area_average_preserves_mean():
     rig = fake_rig()
     rig.tactile_frames = {"gel_left": [], "gel_right": []}

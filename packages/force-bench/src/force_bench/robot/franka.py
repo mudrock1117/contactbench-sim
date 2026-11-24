@@ -114,6 +114,28 @@ class FrankaIK:
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, state)
         return state.body_q.numpy()[self.ee_index].copy()
 
+    def tcp_pose_for_joint_q(self, joint_q) -> np.ndarray:
+        """World xyz+xyzw TCP FK without changing the IK model or solver seed.
+
+        The private Franka model defines the same fr3_hand_tcp frame used by
+        EndEffectorActionAdapter. eval_q and state are fresh allocations, so
+        live simulation state, self.model.joint_q, self.joint_q, objectives,
+        and expert drive targets are never assigned or restored.
+        """
+        values = np.asarray(joint_q, dtype=float)
+        if values.shape != (9,) or not np.isfinite(values).all():
+            raise ValueError("Franka FK joint_q must be finite shape [9]")
+        candidate = self.model.joint_q.numpy().copy()
+        candidate[:9] = values
+        eval_q = wp.clone(self.model.joint_q)
+        eval_q.assign(candidate)
+        state = self.model.state()
+        newton.eval_fk(self.model, eval_q, self.model.joint_qd, state)
+        pose = state.body_q.numpy()[self.ee_index].copy()
+        if pose.shape != (7,) or not np.isfinite(pose).all():
+            raise RuntimeError("Franka FK produced an invalid TCP pose")
+        return pose
+
     def body_pose(self, label: str) -> np.ndarray:
         state = self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, state)

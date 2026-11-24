@@ -87,6 +87,17 @@ def robot_action(rig):
     return np.asarray(_numpy(rig.control.joint_target_q)[:ROBOT_DOF], dtype=np.float32).copy()
 
 
+def _fk_tcp_pose(rig, joint_q):
+    """Return world xyz+xyzw for a 9D FR3 state using side-effect-free FK."""
+    method = getattr(getattr(rig, "ik", None), "tcp_pose_for_joint_q", None)
+    if not callable(method):
+        return None
+    pose = np.asarray(method(np.asarray(joint_q, dtype=float)), dtype=np.float32)
+    if pose.shape != (7,) or not np.isfinite(pose).all():
+        raise ValueError("tcp_pose_for_joint_q must return finite world xyz+xyzw shape [7]")
+    return pose.copy()
+
+
 class RigObservation:
     """Measured robot q/qd followed by nonrobot world body poses (privileged).
 
@@ -204,6 +215,8 @@ class RigCollector:
                  rgb_config=None):
         self.rig = rig
         self.observation = RigObservation(rig)
+        self.has_eef_fk = callable(
+            getattr(getattr(rig, "ik", None), "tcp_pose_for_joint_q", None))
         self.has_tactile = bool(getattr(rig, "gel_sensors", {}))
         self.tactile_size = int(tactile_size)
         if self.tactile_size < 1:
@@ -221,13 +234,19 @@ class RigCollector:
                                            "Nonzero robot velocity/feedforward commands require corresponding action support."],
                     "extra_action_fields": {"action_target_velocity": "robot joint target velocity rad/s (7), m/s (2)",
                                             "action_feedforward": "robot joint torque N m (7), force N (2)"}}
-        metadata["eef_action_fields"] = {
-            "action_anchor_tcp_pose_world_xyzw": "measured command-start TCP pose (m, xyzw)",
-            "action_tcp_target_world_xyzw": "FK of exact recorded 9D target (m, xyzw)",
-            "action_anchor_gripper_width_m": "measured absolute width (m)",
-            "action_gripper_width_m": "commanded absolute width (m)",
-            "conversion": "10D is target relative to one policy-chunk anchor; no state-delta substitution",
-        }
+        if self.has_eef_fk:
+            metadata["eef_action_fields"] = {
+                "action_anchor_tcp_pose_world_xyzw": "measured command-start TCP pose (m, xyzw)",
+                "action_tcp_target_world_xyzw": "FK of exact recorded 9D target (m, xyzw)",
+                "action_anchor_gripper_width_m": "measured absolute width (m)",
+                "action_gripper_width_m": "commanded absolute width (m)",
+                "alignment": "one entry per action; command-start time is timestamps[:-1]",
+                "tcp_frame": "fr3/fr3_hand_tcp, world xyz+xyzw",
+                "conversion": "10D is target relative to one policy-chunk anchor; no state-delta substitution",
+            }
+        else:
+            metadata["eef_action_fields_unavailable"] = (
+                "rig has no side-effect-free FrankaIK.tcp_pose_for_joint_q")
         from .task_language import task_instruction
         metadata["language_instruction"] = task_instruction(metadata["task"])
         metadata["language_semantics"] = "task-only instruction; contains no state, phase, or outcome"
@@ -271,9 +290,11 @@ class RigCollector:
             extra[output] = np.zeros(ROBOT_DOF, dtype=np.float32) if values is None else _numpy(values)[:ROBOT_DOF].copy()
         command = robot_action(self.rig)
         measured = self.observation.sample()[:ROBOT_DOF]
-        anchor_pose = _fk_tcp_pose(self.rig, measured)
-        target_pose = _fk_tcp_pose(self.rig, command)
-        if anchor_pose is not None and target_pose is not None:
+        if self.has_eef_fk:
+            anchor_pose = _fk_tcp_pose(self.rig, measured)
+            target_pose = _fk_tcp_pose(self.rig, command)
+            if anchor_pose is None or target_pose is None:
+                raise RuntimeError("A4 EEF FK became unavailable during collection")
             extra["action_anchor_tcp_pose_world_xyzw"] = anchor_pose
             extra["action_tcp_target_world_xyzw"] = target_pose
             extra["action_anchor_gripper_width_m"] = np.float32(measured[7] + measured[8])
