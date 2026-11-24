@@ -140,8 +140,16 @@ def read_tactile(rig, size=16):
     for i, pad in enumerate(PAD_ORDER):
         frames = getattr(rig, "tactile_frames", {}).get(pad, [])
         if frames:
-            values[i] = _area_resize(frames[-1].pressure_pa, size)
-            valid[i] = True
+            frame = frames[-1]
+            pressure = np.asarray(frame.pressure_pa, dtype=np.float32)
+            values[i] = _area_resize(pressure, size)
+            # A frame object alone is not evidence that the pressure raster
+            # measured its solver contact. This catches a real contact on an
+            # un-imaged gel margin (non-zero pad force, zero raster) instead
+            # of silently publishing it as valid zero pressure.
+            force_n = float(getattr(frame, "total_normal_force_n", 0.0))
+            valid[i] = bool(np.isfinite(pressure).all() and
+                            not (force_n > 1.0e-6 and not np.any(pressure > 0.0)))
     return values, valid
 
 

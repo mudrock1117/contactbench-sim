@@ -296,6 +296,13 @@ GS_PICK_GRIP_BAND = (0.8, 2.5) # soft-gel pick/hold/lift; later phases use GRIP_
 GS_HOLD_STABLE_S = 0.20
 GS_HOLD_MAX_S = 1.50
 GS_LIFT_LOST_FORCE_N = 0.5
+GS_LIFT_GRIP_BAND = (
+    _env("AK_GS_LIFT_FORCE_MIN_N", 1.2),
+    _env("AK_GS_LIFT_FORCE_MAX_N", 4.0),
+)
+GS_LIFT_PRELOAD_S = _env("AK_GS_LIFT_PRELOAD_S", 0.15)
+GS_GRIP_TRIM_STEP = _env("AK_GS_TRIM_STEP_MM", 0.02) * MM
+GS_GRIP_TRIM_MAX = _env("AK_GS_TRIM_MAX_MM", 1.5) * MM
 IMPRATIO = 10.0                # small-part pinch (plug_in_usb / hang_* lesson)
 # pad fingertip collision box in the finger frame (FR3 URDF shape 47 / 53)
 PAD_BOX_C = np.array([0.0, 7.58, 45.25]) * MM
@@ -366,6 +373,10 @@ T = dict(settle=0.5, descend=1.0, pre=0.3, close=0.6, hold=0.3, lift=0.9, liftho
          carry=1.4, tilt=3.0, hover=1.2, align=0.5, liftout=0.4, back=1.6, unwind=2.5,
          seat_hold=0.5, extract=0.6, up=1.2, untilt=3.0, carryback=1.6, lower=1.4,
          open=0.5, retreat=1.0, still=1.0, probe=1.0)
+if GS.GS_ON:
+    # The soft pads need a lower acceleration than the rigid fingertips. The
+    # 80 mm move is unchanged; only its duration is GelSight-specific.
+    T["lift"] = _env("AK_GS_LIFT_S", 1.8)
 T_STILL_SETTLE = 0.4           # the arm tracker finishes the retreat in here
 PLACE_ABOVE = 0.025            # carry back to this far above the place pose
 T_INSERT_MAX = 3.0
@@ -769,6 +780,20 @@ def run(mode: str):
         raise RuntimeError("AK_GRASP_CHECK is diagnostic only and cannot publish a dataset episode")
     rig = (appendix_rig(name, rig_cls=GS.GelSightRig, gel_config=GS.GEL_CFG)
            if GS.GS_ON else appendix_rig(name))
+    if GS.GS_ON:
+        # Allen-key contact is made at the tip zone. The case gel is 25.25 x
+        # 20.75 mm while the optical crop is only 18.6 x 14.3 mm; the old
+        # centred crop therefore reported a zero raster for genuine contacts
+        # on the un-imaged elastomer margin. Expert data records a mechanics
+        # pressure grid, not tactile RGB, so cover the complete physical gel
+        # surface and retain the same grid resolution. This changes only the
+        # calibrated footprint: mounting geometry and contact physics do not
+        # move. The switch permits exact legacy A/B runs.
+        if os.environ.get("AK_GS_PRESSURE_FULL_PAD", "1") != "0":
+            from dataclasses import replace
+            from force_bench.tactile.rig import GEL_PAD_H, GEL_PAD_W
+            rig.gel_config = replace(rig.gel_config,
+                                     width_m=GEL_PAD_W, height_m=GEL_PAD_H)
     rig.hard_joint_limits = True              # the seat is a HARD stop
     rig.solver_options["impratio"] = IMPRATIO
     h = build_scene(rig, mode)
@@ -957,7 +982,8 @@ def run(mode: str):
               probe=0.0, from_p=None, from_R=None, psi_end=None, place_z=None,
               ins_depth=[], G_log=[], strokes=[], unwinds=[], turn_sub="run", t_sub=0.0,
               psi_seat=None, tau_pk=0.0, unw_ok=0,
-              grip_stable_frames=0, grip_lost_frames=0, grasp_ref=None)
+              grip_stable_frames=0, grip_lost_frames=0, grasp_ref=None,
+              lift_preload=False)
     key_com_z0 = float((key_T(rig.s0.body_q.numpy())[:3, :3] @
                         h["key_raw"].center_mass + key_T(rig.s0.body_q.numpy())[:3, 3])[2])
     order = ORDER
@@ -975,10 +1001,14 @@ def run(mode: str):
         for pad in ("gel_left", "gel_right"):
             frames = getattr(rig, "tactile_frames", {}).get(pad, ())
             if frames:
-                pressure = np.asarray(frames[-1].pressure_pa)
+                frame = frames[-1]
+                pressure = np.asarray(frame.pressure_pa)
+                raster_valid = not (frame.total_normal_force_n > 1.0e-6 and
+                                    not np.any(pressure > 0.0))
                 pressures[pad] = {"max_pa": float(pressure.max()),
-                                  "nonzero": int(np.count_nonzero(pressure))}
-                valid.append(True)
+                                  "nonzero": int(np.count_nonzero(pressure)),
+                                  "raster_valid": bool(raster_valid)}
+                valid.append(bool(raster_valid))
             else:
                 pressures[pad] = {"max_pa": 0.0, "nonzero": 0}
                 valid.append(False)
@@ -986,7 +1016,8 @@ def run(mode: str):
         lift = key_com_z - key_com_z0
         forces = [last("padL"), last("padR")]
         body_qd = state.body_qd.numpy()[ki]
-        linear_speed = float(np.linalg.norm(body_qd[3:]))
+        # Newton spatial vectors are [linear_xyz, angular_xyz].
+        linear_speed = float(np.linalg.norm(body_qd[:3]))
         return {"mode": "grasp_check", "complete_task_qa": False,
                 "gelsight": bool(GS.GS_ON),
                 "case_tip_extend_m": float(GS_TIP_EXTEND),
@@ -1021,10 +1052,15 @@ def run(mode: str):
         pressures = {}
         for pad in ("gel_left", "gel_right"):
             frames = getattr(rig, "tactile_frames", {}).get(pad, ())
-            pressure = (np.asarray(frames[-1].pressure_pa) if frames
+            frame = frames[-1] if frames else None
+            pressure = (np.asarray(frame.pressure_pa) if frame is not None
                         else np.zeros((0,), dtype=np.float32))
+            raster_valid = bool(frame is not None and
+                                not (frame.total_normal_force_n > 1.0e-6 and
+                                     not np.any(pressure > 0.0)))
             pressures[pad] = {"max_pa": float(pressure.max()) if pressure.size else 0.0,
-                              "nonzero": int(np.count_nonzero(pressure))}
+                              "nonzero": int(np.count_nonzero(pressure)),
+                              "raster_valid": raster_valid}
         TK0 = key_T(rig.s0.body_q.numpy())
         key_com_z = float((TK0[:3, :3] @ h["key_raw"].center_mass + TK0[:3, 3])[2])
         payload = {"event": "grasp_phase", "t": float(t), "phase": st["ph"],
@@ -1037,7 +1073,9 @@ def run(mode: str):
                    "tcp_tool_rotation_delta_rad": rotation_angle,
                    "tool_lift_m": key_com_z - key_com_z0,
                    "trim_m": float(st["trim"]),
-                   "trim_at_limit": bool(abs(st["trim"]) >= GRIP_TRIM_MAX - 1e-12)}
+                   "trim_at_limit": bool(abs(st["trim"]) >=
+                                         (GS_GRIP_TRIM_MAX if GS.GS_ON else
+                                          GRIP_TRIM_MAX) - 1e-12)}
         print("GRASP_DIAG " + json.dumps(payload), flush=True)
 
     def go(ph, t):
@@ -1098,12 +1136,19 @@ def run(mode: str):
         """Finger target: F_CLOSE_DOF plus a slow admittance trim that only
         acts when the mean pad force leaves GRIP_BAND (GelSight readiness)."""
         F = 0.5 * (last("padL") + last("padR"))
-        band = (GS_PICK_GRIP_BAND if GS.GS_ON and st["ph"] in
-                ("hold", "lift", "lifthold") else GRIP_BAND)
+        lift_grip = GS.GS_ON and (st["ph"] in ("lift", "lifthold") or
+                                  (st["ph"] == "hold" and st["lift_preload"]))
+        band = (GS_LIFT_GRIP_BAND if lift_grip else
+                (GS_PICK_GRIP_BAND if GS.GS_ON and st["ph"] == "hold"
+                 else GRIP_BAND))
+        trim_step = GS_GRIP_TRIM_STEP if GS.GS_ON and st["ph"] in (
+            "hold", "lift", "lifthold") else GRIP_TRIM_STEP
+        trim_max = GS_GRIP_TRIM_MAX if GS.GS_ON and st["ph"] in (
+            "hold", "lift", "lifthold") else GRIP_TRIM_MAX
         if F < band[0]:
-            st["trim"] = max(-GRIP_TRIM_MAX, st["trim"] - GRIP_TRIM_STEP)
+            st["trim"] = max(-trim_max, st["trim"] - trim_step)
         elif F > band[1]:
-            st["trim"] = min(GRIP_TRIM_MAX, st["trim"] + GRIP_TRIM_STEP)
+            st["trim"] = min(trim_max, st["trim"] + trim_step)
         return F_CLOSE_DOF + st["trim"]
 
     def end_stroke(t, q):
@@ -1151,16 +1196,25 @@ def run(mode: str):
         elif ph == "hold":
             p = p_pick
             if GS.GS_ON:
-                bilateral = min(last("padL"), last("padR")) >= GS_PICK_GRIP_BAND[0]
+                threshold = (GS_LIFT_GRIP_BAND[0] if st["lift_preload"]
+                             else GS_PICK_GRIP_BAND[0])
+                bilateral = min(last("padL"), last("padR")) >= threshold
                 st["grip_stable_frames"] = (st["grip_stable_frames"] + 1
                                              if bilateral else 0)
                 stable_s = st["grip_stable_frames"] / rig.fps
-                if t - st["t0"] >= T["hold"] and stable_s >= GS_HOLD_STABLE_S:
+                if (not st["lift_preload"] and t - st["t0"] >= T["hold"]
+                        and stable_s >= GS_HOLD_STABLE_S):
+                    # Establish the stronger lift band while stationary. Do
+                    # not accelerate and ask the trim servo to catch up at
+                    # the same instant.
+                    st["lift_preload"] = True
+                    st["grip_stable_frames"] = 0
+                elif st["lift_preload"] and stable_s >= GS_LIFT_PRELOAD_S:
                     go("lift", t)
                 elif t - st["t0"] >= GS_HOLD_MAX_S:
                     raise _GraspFailure(
                         f"bilateral GelSight grip did not remain above "
-                        f"{GS_PICK_GRIP_BAND[0]:.2f} N for {GS_HOLD_STABLE_S:.2f} s")
+                        f"{threshold:.2f} N for the required stationary window")
             elif t - st["t0"] >= T["hold"]:
                 go("lift", t)
         elif ph == "lift":

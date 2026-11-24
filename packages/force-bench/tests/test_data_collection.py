@@ -140,6 +140,17 @@ def test_tactile_initial_invalid_and_area_average_preserves_mean():
     assert pressure[1].sum() == 0
 
 
+def test_tactile_force_without_pressure_raster_is_invalid():
+    """An out-of-FOV contact must not masquerade as valid zero pressure."""
+    frame = SimpleNamespace(pressure_pa=np.zeros((4, 4), dtype=np.float32),
+                            total_normal_force_n=1.7)
+    rig = fake_rig()
+    rig.tactile_frames = {"gel_left": [frame], "gel_right": [frame]}
+    pressure, valid = read_tactile(rig, size=2)
+    assert pressure.shape == (2, 2, 2)
+    assert not valid.any()
+
+
 def test_process_failure_beats_even_fresh_qa_pass(tmp_path):
     (tmp_path / "appendix_qa.json").write_text(json.dumps({"pass": True}))
     outcome = qa_outcome(tmp_path, returncode=1)
