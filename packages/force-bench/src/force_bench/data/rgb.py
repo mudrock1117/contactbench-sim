@@ -17,10 +17,20 @@ import tempfile
 import imageio.v3 as iio
 import numpy as np
 
-from force_bench.teleop.camera import TeleopCamera
-from force_bench.geometry import world_T
-
 from .episode import atomic_json
+
+def _world_T(pose):
+    """Import simulation geometry only on online camera paths."""
+    from force_bench.geometry import world_T
+    return world_T(pose)
+
+
+def _camera_factory(factory):
+    if factory is not None:
+        return factory
+    from force_bench.teleop.camera import TeleopCamera
+    return TeleopCamera
+
 
 CAMERA_NAME = "fixed"
 DEFAULT_WRIST_POSITION_TCP = np.array([0.055, 0.0, -0.035])
@@ -110,8 +120,8 @@ def ensure_collection_cameras(rig, camera_names, *, fixed_camera=None):
     if "wrist" in names and getattr(rig, "collection_wrist_camera", None) is None:
         if not hasattr(rig, "ik"):
             raise ValueError("wrist RGB requires a rig with FrankaIK")
-        T_world_link = world_T(rig.ik.body_pose("fr3/fr3_link7"))
-        T_world_tcp = world_T(rig.ik.tcp_pose())
+        T_world_link = _world_T(rig.ik.body_pose("fr3/fr3_link7"))
+        T_world_tcp = _world_T(rig.ik.tcp_pose())
         T_link_tcp = np.linalg.inv(T_world_link) @ T_world_tcp
         T_link_camera = wrist_mount_from_tcp(
             T_link_tcp, DEFAULT_WRIST_POSITION_TCP, DEFAULT_WRIST_TARGET_TCP,
@@ -168,9 +178,10 @@ def rgb_config_from_env(environment=None):
 class FixedRGBCapture:
     """Stream fixed-camera PNGs aligned to post-physics simulation times."""
 
-    def __init__(self, rig, output, episode_id, camera, config, *, camera_factory=TeleopCamera,
+    def __init__(self, rig, output, episode_id, camera, config, *, camera_factory=None,
                  camera_name=CAMERA_NAME):
         self.rig = rig
+        camera_factory = _camera_factory(camera_factory)
         self.output = Path(output)
         self.fps = float(config["fps"])
         if self.fps > float(rig.fps):
@@ -283,7 +294,7 @@ class WristRGBCapture(FixedRGBCapture):
     ``state.body_q`` immediately before every rendered frame.
     """
 
-    def __init__(self, rig, output, episode_id, camera, config, *, camera_factory=TeleopCamera):
+    def __init__(self, rig, output, episode_id, camera, config, *, camera_factory=None):
         self.link_label = camera.get("link_label", "fr3/fr3_link7")
         self.link_index = list(rig.model.body_label).index(self.link_label)
         if "T_link_camera" in camera:
@@ -296,7 +307,7 @@ class WristRGBCapture(FixedRGBCapture):
         if self.T_link_camera.shape != (4, 4):
             raise ValueError("T_link_camera must be 4x4")
         self.T_link_camera = _validate_rigid_transform(self.T_link_camera, "T_link_camera")
-        T_world_link = world_T(rig.s0.body_q.numpy()[self.link_index])
+        T_world_link = _world_T(rig.s0.body_q.numpy()[self.link_index])
         T_world_camera = T_world_link @ self.T_link_camera
         initial = {"position": T_world_camera[:3, 3],
                    "target": T_world_camera[:3, 3] - T_world_camera[:3, 2],
@@ -321,7 +332,7 @@ class WristRGBCapture(FixedRGBCapture):
     def capture(self, state, timestamp, *, force=False):
         if not force and not self._due(float(timestamp)):
             return False
-        T_world_link = world_T(state.body_q.numpy()[self.link_index])
+        T_world_link = _world_T(state.body_q.numpy()[self.link_index])
         self.camera.set_transform(T_world_link @ self.T_link_camera)
         return super().capture(state, timestamp, force=True)
 
@@ -335,9 +346,10 @@ class LiveRGBCamera:
     """
 
     def __init__(self, rig, name, camera, *, fps=12.0, width=320, height=240,
-                 camera_factory=TeleopCamera):
+                 camera_factory=None):
         if name not in ("fixed", "wrist"):
             raise ValueError("live RGB camera must be fixed or wrist")
+        camera_factory = _camera_factory(camera_factory)
         self.rig, self.name = rig, name
         self.fps, self.width, self.height = float(fps), int(width), int(height)
         if self.fps <= 0 or self.fps > float(rig.fps):
@@ -359,7 +371,7 @@ class LiveRGBCamera:
                     camera.get("position_link", [0.04, 0, 0.04]),
                     camera.get("target_link", [0.12, 0, 0]),
                     camera.get("up_link", [0.0, 0.0, 1.0]))
-            T = world_T(rig.s0.body_q.numpy()[self.link_index]) @ self.T_link_camera
+            T = _world_T(rig.s0.body_q.numpy()[self.link_index]) @ self.T_link_camera
             pos, target = T[:3, 3], T[:3, 3] - T[:3, 2]
             mount = "wrist_link"
         self.camera = camera_factory(rig.model, pos, target, width=self.width,
@@ -382,7 +394,7 @@ class LiveRGBCamera:
 
     def _update_pose(self, state):
         if self.link_index is not None:
-            T = world_T(state.body_q.numpy()[self.link_index]) @ self.T_link_camera
+            T = _world_T(state.body_q.numpy()[self.link_index]) @ self.T_link_camera
             self.camera.set_transform(T)
 
     def sample(self, state, timestamp, *, force=False):

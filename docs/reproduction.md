@@ -101,3 +101,15 @@ recorded auxiliary commands are nonzero. Formal results need whole episode/seed
 splits and multiple episodes. RDP, pi0.5 and FTP-1 are version-locked only and
 still need model-specific adapters. GelSight pressure is physical pressure, not
 tactile RGB, and no conversion is implied.
+
+
+## Offline dependency boundary
+
+Episode discovery, RGB checksum/timestamp validation, window construction, pure
+10D EEF conversion, official training, offline prediction and the PyTorch inference
+server do not import Warp, Newton, MuJoCo or TeleopCamera. Simulation dependencies
+are loaded only when a capture/live camera or online EEF controller is constructed.
+This same boundary is intended for the later RDP, pi0.5 and FTP-1 dataset adapters.
+
+    python -c "from force_bench.data.dataset import EpisodeWindowDataset; from force_bench.robot.eef_action import encode_relative_eef; print('offline imports ok')"
+    pytest -q packages/force-bench/tests/test_offline_dependency_isolation.py

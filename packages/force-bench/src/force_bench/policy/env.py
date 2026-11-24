@@ -19,8 +19,8 @@ from force_bench.data.task_language import task_instruction
 from force_bench.data.timebase import ActionChunkExecutor, PolicyTimeConfig, PolicyFrameScheduler
 from force_bench.robot.actions import (EndEffectorActionAdapter, EndEffectorActionConfig,
                                        JointPositionActionAdapter)
-from force_bench.robot.eef_action import (RelativeEEF10DActionAdapter, pose_xyzw_to_matrix,
-                                          relative_eef_history)
+from force_bench.robot.eef_action import pose_xyzw_to_matrix, relative_eef_history
+from force_bench.robot.eef_control import RelativeEEF10DActionAdapter
 
 
 @dataclass(frozen=True)
