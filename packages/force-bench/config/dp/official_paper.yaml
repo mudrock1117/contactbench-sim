@@ -80,9 +80,9 @@ task:
     val_ratio: 0.0
   env_runner:
     _target_: force_bench.dp.official_runner.ContactBenchOfflineImageRunner
-logging: {project: contactbench-dp, resume: true, mode: online, name: ${name}, tags: [contactbench, official-dp, card], id: null, group: null}
+logging: {project: contactbench-dp, resume: true, mode: online, name: "${name}", tags: [contactbench, official-dp, card], id: null, group: null}
 checkpoint:
   save_last_ckpt: true
   save_last_snapshot: false
   topk: {monitor_key: train_loss, mode: min, k: 3, format_str: "epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt"}
-multi_run: {run_dir: outputs/dp/official_card, wandb_name_base: ${name}}
+multi_run: {run_dir: outputs/dp/official_card, wandb_name_base: "${name}"}
