@@ -28,10 +28,14 @@ class ContactBenchOfficialRDPDataset(BaseImageDataset):
 
     def __init__(self, data_path, pca_transform_path=None, pca_mean_path=None,
                  pca_mode="official", pca_artifact_path=None,
-                 observation_horizon=2, horizon=32, success_only=True,
+                 observation_horizon=2, horizon=32,
+                 obs_temporal_downsample_ratio=2, success_only=True,
                  seed=0, val_ratio=0.0, at=None,
                  use_latent_action_before_vq=False):
         super().__init__()
+        if int(obs_temporal_downsample_ratio) != 2:
+            raise ValueError("official RDP requires 24 Hz to 12 Hz ratio 2")
+        self.obs_temporal_downsample_ratio = int(obs_temporal_downsample_ratio)
         self.time = RDPTimeConfig(
             observation_horizon=int(observation_horizon),
             action_horizon=int(horizon))
