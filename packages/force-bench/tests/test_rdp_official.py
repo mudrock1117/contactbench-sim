@@ -234,3 +234,96 @@ def test_simulation_pca_checksum_is_enforced(tmp_path):
     (tmp_path / "left_mean.npy").write_bytes(b"corrupt")
     with pytest.raises(ValueError, match="checksum"):
         SimulationFittedGelSightPCA(tmp_path)
+
+
+def _fake_rdp_normalizer(*, include_tactile=True, tactile_width=30,
+                         nonfinite=False):
+    import torch
+    from torch import nn
+
+    def field(width):
+        scale = torch.ones(width)
+        if nonfinite:
+            scale[0] = float("nan")
+        return nn.ParameterDict({
+            "scale": nn.Parameter(scale, requires_grad=False),
+            "offset": nn.Parameter(torch.zeros(width), requires_grad=False),
+            "input_stats": nn.ParameterDict({
+                "min": nn.Parameter(torch.zeros(width), requires_grad=False),
+                "max": nn.Parameter(torch.ones(width), requires_grad=False),
+                "mean": nn.Parameter(torch.zeros(width), requires_grad=False),
+                "std": nn.Parameter(torch.ones(width), requires_grad=False),
+            }),
+        })
+
+    class Normalizer:
+        pass
+
+    value = Normalizer()
+    fields = {"action": field(10)}
+    if include_tactile:
+        fields["tactile_marker_pca"] = field(tactile_width)
+    value.params_dict = nn.ParameterDict(fields)
+    return value
+
+
+class _FakeAT:
+    def __init__(self, normalizer):
+        self.normalizer = normalizer
+
+    def set_normalizer(self, normalizer):
+        import copy
+        self.normalizer = copy.deepcopy(normalizer)
+
+
+class _FakePolicy:
+    def __init__(self, normalizer, at_normalizer):
+        self.normalizer = normalizer
+        self.at = _FakeAT(at_normalizer)
+
+
+def test_rdp_nested_at_normalizer_is_restored_from_parent_checkpoint_state():
+    from force_bench.rdp.checkpoint import (
+        restore_nested_at_normalizer, validate_policy_normalizers)
+    parent = _fake_rdp_normalizer()
+    policy = _FakePolicy(parent, _fake_rdp_normalizer(include_tactile=False))
+    restore_nested_at_normalizer(policy)
+    validate_policy_normalizers(policy)
+    assert policy.at.normalizer.params_dict[
+        "tactile_marker_pca"]["scale"].numel() == 30
+    assert policy.at.normalizer.params_dict["action"]["scale"].numel() == 10
+
+
+def test_rdp_model_and_ema_nested_normalizers_restore_together():
+    from types import SimpleNamespace
+    from force_bench.rdp.checkpoint import restore_workspace_normalizers
+    model = _FakePolicy(
+        _fake_rdp_normalizer(), _fake_rdp_normalizer(include_tactile=False))
+    ema = _FakePolicy(
+        _fake_rdp_normalizer(), _fake_rdp_normalizer(include_tactile=False))
+    workspace = SimpleNamespace(model=model, ema_model=ema)
+    restore_workspace_normalizers(workspace)
+    assert "tactile_marker_pca" in model.at.normalizer.params_dict
+    assert "tactile_marker_pca" in ema.at.normalizer.params_dict
+
+
+@pytest.mark.parametrize(
+    "normalizer, message",
+    [
+        (_fake_rdp_normalizer(include_tactile=False), "missing"),
+        (_fake_rdp_normalizer(tactile_width=29), "width"),
+        (_fake_rdp_normalizer(nonfinite=True), "non-finite"),
+    ],
+)
+def test_rdp_checkpoint_normalizer_validation_fails_closed(normalizer, message):
+    from force_bench.rdp.checkpoint import restore_nested_at_normalizer
+    policy = _FakePolicy(
+        normalizer, _fake_rdp_normalizer(include_tactile=False))
+    with pytest.raises(ValueError, match=message):
+        restore_nested_at_normalizer(policy)
+
+
+def test_rdp_offline_and_server_share_checkpoint_loader():
+    from force_bench.rdp.official_predict import _load
+    from force_bench.rdp import official_server
+    assert official_server._load is _load
