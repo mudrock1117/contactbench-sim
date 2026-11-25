@@ -46,17 +46,29 @@ def main(argv=None):
     p.add_argument("--output", required=True)
     p.add_argument("--split-name", choices=("train",), default="train")
     p.add_argument("--episode-id", action="append", default=[])
+    p.add_argument("--train-episode-list",
+                   help="newline-delimited train episode IDs; required for formal fits")
     p.add_argument("--smoke-single-episode", action="store_true")
     a = p.parse_args(argv)
 
     output = Path(a.output)
     if output.exists():
         raise FileExistsError(f"refusing to overwrite PCA artifact {output}")
+    selected_ids = set(a.episode_id)
+    list_path = Path(a.train_episode_list) if a.train_episode_list else None
+    if list_path is not None:
+        if selected_ids:
+            raise ValueError("use --episode-id or --train-episode-list, not both")
+        selected_ids = {
+            line.strip() for line in list_path.read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith("#")}
+        if not selected_ids:
+            raise ValueError("train episode list is empty")
     paths = discover_episodes(a.dataset, success_only=True)
     episodes = []
     for path in paths:
         ep = load_episode(path)
-        if a.episode_id and str(ep.metadata["episode_id"]) not in a.episode_id:
+        if selected_ids and str(ep.metadata["episode_id"]) not in selected_ids:
             continue
         episodes.append((path, ep))
     if not episodes:
@@ -66,6 +78,14 @@ def main(argv=None):
             "one-episode PCA is smoke-only; pass --smoke-single-episode explicitly")
     if len(episodes) > 1 and a.smoke_single_episode:
         raise ValueError("--smoke-single-episode requires exactly one selected episode")
+    if not a.smoke_single_episode and list_path is None:
+        raise ValueError(
+            "formal PCA fitting requires --train-episode-list to prevent test leakage")
+    if list_path is not None:
+        found = {str(ep.metadata["episode_id"]) for _, ep in episodes}
+        missing = selected_ids - found
+        if missing:
+            raise ValueError(f"train episode IDs not found: {sorted(missing)}")
 
     per_side = [[], []]
     sources = []
@@ -123,6 +143,10 @@ def main(argv=None):
         "fit_scope": "engineering_smoke_single_episode"
                      if a.smoke_single_episode else "training_episodes_only",
         "source_dataset": str(Path(a.dataset)),
+        "train_episode_list": (None if list_path is None else {
+            "path": str(list_path),
+            "sha256": hashlib.sha256(list_path.read_bytes()).hexdigest(),
+        }),
         "source_episodes": sources,
         "fit_algorithm": "numpy.linalg.svd; centered; per-pad; deterministic sign",
         "numpy_version": np.__version__,
