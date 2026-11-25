@@ -17,6 +17,8 @@ config:
       data_path: ${oc.env:TB_RDP_DATASET,outputs/datasets/card_multimodal}
       pca_transform_path: ${oc.env:TB_RDP_UPSTREAM,third_party/reactive_diffusion_policy}/data/PCA_Transform_GelSight/pca_transform_matrix.npy
       pca_mean_path: ${oc.env:TB_RDP_UPSTREAM,third_party/reactive_diffusion_policy}/data/PCA_Transform_GelSight/pca_mean_matrix.npy
+      pca_mode: ${oc.env:TB_RDP_PCA_MODE,simulation_fitted}
+      pca_artifact_path: ${oc.env:TB_RDP_PCA_ARTIFACT,outputs/rdp/pca/card_sim15}
       observation_horizon: 2
       horizon: 32
       success_only: true
