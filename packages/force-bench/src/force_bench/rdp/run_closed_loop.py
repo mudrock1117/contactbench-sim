@@ -26,11 +26,56 @@ def _response(conn, request):
     return result
 
 
+def _marker_status(rig):
+    marker, valid = read_rig_markers(rig)
+    frames = getattr(rig, "tactile_frames", {})
+    counts = {
+        pad: len(frames.get(pad, ())) for pad in ("gel_left", "gel_right")}
+    return marker, valid, counts
+
+
 def _marker_embedding(env, pca):
-    marker, valid = read_rig_markers(env.rig)
+    marker, valid, counts = _marker_status(env.rig)
     if not np.all(valid):
-        raise RuntimeError("both GelSight marker streams must be valid")
-    return pca.transform(marker, image_width_px=240, image_height_px=320).reshape(30)
+        raise RuntimeError(
+            "both GelSight marker streams must be valid; "
+            f"valid={valid.tolist()} frame_counts={counts}")
+    return pca.transform(
+        marker, image_width_px=240, image_height_px=320).reshape(30)
+
+
+def _rgb_is_current(observation):
+    valid = observation.get("rgb_valid", False)
+    timestamps = observation.get("rgb_timestamp", np.nan)
+    now = float(observation["timestamp"])
+    if isinstance(valid, dict):
+        return (all(bool(value) for value in valid.values()) and
+                all(np.isclose(float(value), now, atol=1e-12, rtol=0.0)
+                    for value in timestamps.values()))
+    return (bool(valid) and
+            np.isclose(float(timestamps), now, atol=1e-12, rtol=0.0))
+
+
+def _initialize_marker_history(env, observation, pca, timing, max_frames):
+    """Wait for real dual-pad frames and one timestamp-aligned RGB state."""
+    def ready(rig, current):
+        _, valid, _ = _marker_status(rig)
+        return bool(np.all(valid) and _rgb_is_current(current))
+
+    warmup_frames = 0
+    if not ready(env.rig, observation):
+        try:
+            observation, warmup_frames = env.warmup_sensors(
+                ready, max_physics_frames=max_frames)
+        except TimeoutError as error:
+            _, valid, counts = _marker_status(env.rig)
+            raise RuntimeError(
+                f"GelSight initialization timed out after {max_frames} "
+                f"physics frames; valid={valid.tolist()} "
+                f"frame_counts={counts}") from error
+    marker = _marker_embedding(env, pca)
+    history = [marker.copy() for _ in range(timing.dataset_obs_steps)]
+    return observation, history, warmup_frames
 
 
 def main(argv=None):
@@ -39,6 +84,7 @@ def main(argv=None):
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8766)
     p.add_argument("--max-fast-steps", type=int, default=600)
+    p.add_argument("--sensor-warmup-frames", type=int, default=120)
     p.add_argument("--pca-mode", choices=("official", "simulation_fitted"),
                    default="simulation_fitted")
     p.add_argument("--pca-artifact")
@@ -71,7 +117,16 @@ def main(argv=None):
     executed = replans = 0
     try:
         observation = env.reset()
-        marker_history = [_marker_embedding(env, pca)] * timing.dataset_obs_steps
+        observation, marker_history, warmup_frames = _initialize_marker_history(
+            env, observation, pca, timing, a.sensor_warmup_frames)
+        print(json.dumps({
+            "event": "sensors_ready",
+            "warmup_physics_frames": warmup_frames,
+            "policy_fast_steps": executed,
+            "timestamp": float(observation["timestamp"]),
+            "rgb_timestamp": float(observation["rgb_timestamp"]),
+            "marker_valid": [True, True],
+        }), flush=True)
         while not env.done:
             fast_history = observation["history"]
             slow = fast_history[::-2][::-1]
