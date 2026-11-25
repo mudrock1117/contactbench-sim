@@ -64,6 +64,16 @@ def workspace_from_yaml(path: str | Path, *, expected_stage: str | None = None):
             transform_path=dataset_cfg.get("pca_transform_path"),
             mean_path=dataset_cfg.get("pca_mean_path"),
             artifact_path=dataset_cfg.get("pca_artifact_path"))
+        at_checkpoint = cfg.get("at_load_dir")
+        if at_checkpoint:
+            import torch
+            payload = torch.load(str(at_checkpoint), map_location="cpu")
+            saved_cfg = payload.get("cfg") if isinstance(payload, dict) else None
+            saved_fingerprint = (saved_cfg.get("rdp_pca_fingerprint")
+                                 if saved_cfg is not None else None)
+            if saved_fingerprint != cfg.rdp_pca_fingerprint:
+                raise ValueError(
+                    "AT checkpoint PCA fingerprint differs from LDP configuration")
     output_dir = Path(str(cfg.multi_run.run_dir))
     output_dir.mkdir(parents=True, exist_ok=True)
     workspace = get_class(cfg._target_)(cfg, output_dir=str(output_dir))
