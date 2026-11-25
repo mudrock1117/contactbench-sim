@@ -12,7 +12,7 @@ from .inference import load_policy
 
 def main(argv=None):
     p = argparse.ArgumentParser()
-    p.add_argument("--profile", choices=("smoke", "paper"), default="smoke")
+    p.add_argument("--profile", choices=("smoke", "smoke_no_ema", "smoke_lora", "paper"), default="smoke")
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--data", default=str(DEFAULT_DATA))
     p.add_argument("--model-root", default=str(DEFAULT_MODEL_ROOT))
