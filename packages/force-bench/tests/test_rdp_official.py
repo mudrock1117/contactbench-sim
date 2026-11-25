@@ -101,6 +101,9 @@ def test_rdp_profiles_use_locked_official_workspaces():
         assert shape["action"]["shape"] == [10]
         assert shape["obs"]["tactile_marker_pca"]["shape"] == [30]
         assert shape["obs"].get("object_pose") is None
+        dataset = cfg["config"]["task"]["dataset"]
+        assert dataset["pca_mode"].endswith("simulation_fitted}")
+        assert "pca_artifact_path" in dataset
 
 
 def test_marker_window_filter_keeps_valid_no_contact_and_rejects_missing():
@@ -117,3 +120,72 @@ def test_marker_window_filter_keeps_valid_no_contact_and_rejects_missing():
     assert marker_window_indices(timestamps, valid, query) is None
     assert marker_window_indices(timestamps, np.ones((8, 2), bool),
                                  np.array([-1.0 / 24.0])) is None
+
+
+def test_simulation_fitted_pca_artifact_is_versioned_and_per_pad(tmp_path):
+    import hashlib
+    import json
+    from force_bench.rdp.tactile import (
+        SimulationFittedGelSightPCA, marker_metadata)
+    left_mean = np.zeros(126, np.float32)
+    right_mean = np.ones(126, np.float32) * 0.01
+    left_w = np.eye(126, 15, dtype=np.float32)
+    right_w = -left_w
+    arrays = {
+        "left_mean.npy": left_mean,
+        "left_transform.npy": left_w,
+        "right_mean.npy": right_mean,
+        "right_transform.npy": right_w,
+    }
+    hashes = {}
+    for name, value in arrays.items():
+        np.save(tmp_path / name, value)
+        hashes[name] = hashlib.sha256((tmp_path / name).read_bytes()).hexdigest()
+    manifest = {
+        "format_version": 1,
+        "mode": "simulation_fitted",
+        "marker_contract": marker_metadata(official_pca_compatible=False),
+        "normalization": {
+            "x": "divide_by_image_width_px",
+            "y": "divide_by_image_height_px",
+        },
+        "fit_split": "train",
+        "fit_scope": "engineering_smoke_single_episode",
+        "sha256": hashes,
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    pca = SimulationFittedGelSightPCA(tmp_path)
+    marker = np.zeros((3, 2, 63, 2), np.float32)
+    marker[:, 0, :, 0] = 24.0
+    marker[:, 1, :, 1] = 32.0
+    result = pca.transform(marker, image_width_px=240, image_height_px=320)
+    assert result.shape == (3, 2, 15)
+    assert np.isfinite(result).all()
+    assert not np.allclose(result[:, 0], result[:, 1])
+
+
+def test_simulation_pca_checksum_is_enforced(tmp_path):
+    import hashlib
+    import json
+    from force_bench.rdp.tactile import (
+        SimulationFittedGelSightPCA, marker_metadata)
+    hashes = {}
+    for side in ("left", "right"):
+        for suffix, value in (
+                ("mean", np.zeros(126, np.float32)),
+                ("transform", np.zeros((126, 15), np.float32))):
+            path = tmp_path / f"{side}_{suffix}.npy"
+            np.save(path, value)
+            hashes[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest = {
+        "format_version": 1, "mode": "simulation_fitted",
+        "marker_contract": marker_metadata(),
+        "normalization": {
+            "x": "divide_by_image_width_px",
+            "y": "divide_by_image_height_px"},
+        "sha256": hashes,
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    (tmp_path / "left_mean.npy").write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="checksum"):
+        SimulationFittedGelSightPCA(tmp_path)
