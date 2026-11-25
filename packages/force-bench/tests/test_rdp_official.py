@@ -327,3 +327,142 @@ def test_rdp_offline_and_server_share_checkpoint_loader():
     from force_bench.rdp.official_predict import _load
     from force_bench.rdp import official_server
     assert official_server._load is _load
+
+
+def test_zero_displacement_marker_frames_are_valid(monkeypatch):
+    from types import SimpleNamespace
+    from force_bench.rdp import tactile
+
+    monkeypatch.setattr(
+        tactile, "frame_marker_displacement",
+        lambda frame, projector=None: np.zeros((63, 2), np.float32))
+    rig = SimpleNamespace(
+        _rdp_marker_projector=object(),
+        tactile_frames={
+            "gel_left": [SimpleNamespace()],
+            "gel_right": [SimpleNamespace()],
+        })
+    marker, valid = tactile.read_rig_markers(rig)
+    assert marker.shape == (2, 63, 2)
+    assert not np.any(marker)
+    np.testing.assert_array_equal(valid, [True, True])
+
+
+class _FakeWarmupEnv:
+    def __init__(self, ready_after):
+        from types import SimpleNamespace
+        self.ready_after = ready_after
+        self.rig = SimpleNamespace(valid=False, frame_count=0)
+        self.steps = 0
+
+    def warmup_sensors(self, readiness, *, max_physics_frames):
+        for frame in range(1, max_physics_frames + 1):
+            self.rig.frame_count = frame
+            self.rig.valid = frame >= self.ready_after
+            timestamp = frame / 60.0
+            observation = {
+                "timestamp": np.float64(timestamp),
+                "rgb_timestamp": np.float64(timestamp),
+                "rgb_valid": True,
+                "proprio": np.zeros(18, np.float32),
+            }
+            if readiness(self.rig, observation):
+                return observation, frame
+        raise TimeoutError("not ready")
+
+
+class _IdentityMarkerPCA:
+    def transform(self, marker, **kwargs):
+        return np.asarray(marker, np.float32).reshape(2, 126)[..., :15]
+
+
+def test_rdp_marker_warmup_recovers_without_consuming_policy_steps(monkeypatch):
+    from force_bench.rdp import run_closed_loop
+    from force_bench.rdp.timebase import RDPTimeConfig
+
+    def status(rig):
+        marker = np.zeros((2, 63, 2), np.float32)
+        valid = np.array([rig.valid, rig.valid])
+        counts = {"gel_left": rig.frame_count, "gel_right": rig.frame_count}
+        return marker, valid, counts
+
+    monkeypatch.setattr(run_closed_loop, "_marker_status", status)
+    env = _FakeWarmupEnv(ready_after=5)
+    initial = {
+        "timestamp": np.float64(0.0),
+        "rgb_timestamp": np.float64(0.0),
+        "rgb_valid": True,
+        "proprio": np.zeros(18, np.float32),
+    }
+    observation, history, warmup = run_closed_loop._initialize_marker_history(
+        env, initial, _IdentityMarkerPCA(), RDPTimeConfig(), 10)
+    assert warmup == 5
+    assert env.steps == 0
+    assert len(history) == RDPTimeConfig().dataset_obs_steps
+    assert all(value.shape == (30,) for value in history)
+    assert observation["timestamp"] == observation["rgb_timestamp"]
+    assert observation["proprio"].shape == (18,)
+
+
+def test_rdp_marker_warmup_timeout_reports_each_pad(monkeypatch):
+    from force_bench.rdp import run_closed_loop
+    from force_bench.rdp.timebase import RDPTimeConfig
+
+    def status(rig):
+        return (np.zeros((2, 63, 2), np.float32),
+                np.array([False, False]),
+                {"gel_left": rig.frame_count, "gel_right": 0})
+
+    monkeypatch.setattr(run_closed_loop, "_marker_status", status)
+    env = _FakeWarmupEnv(ready_after=100)
+    initial = {
+        "timestamp": np.float64(0.0),
+        "rgb_timestamp": np.float64(0.0),
+        "rgb_valid": True,
+        "proprio": np.zeros(18, np.float32),
+    }
+    with pytest.raises(
+            RuntimeError, match=r"valid=\[False, False\].*gel_left.*gel_right"):
+        run_closed_loop._initialize_marker_history(
+            env, initial, _IdentityMarkerPCA(), RDPTimeConfig(), 3)
+
+
+def test_rdp_warmup_waits_for_timestamp_aligned_rgb(monkeypatch):
+    from force_bench.rdp import run_closed_loop
+    from force_bench.rdp.timebase import RDPTimeConfig
+
+    def status(rig):
+        marker = np.zeros((2, 63, 2), np.float32)
+        return marker, np.array([rig.valid, rig.valid]), {
+            "gel_left": rig.frame_count, "gel_right": rig.frame_count}
+
+    class DelayedRGBEnv(_FakeWarmupEnv):
+        def warmup_sensors(self, readiness, *, max_physics_frames):
+            for frame in range(1, max_physics_frames + 1):
+                self.rig.frame_count = frame
+                self.rig.valid = True
+                timestamp = frame / 60.0
+                rgb_timestamp = timestamp if frame == 5 else 0.0
+                observation = {
+                    "timestamp": np.float64(timestamp),
+                    "rgb_timestamp": np.float64(rgb_timestamp),
+                    "rgb_valid": True,
+                    "proprio": np.full(18, frame, np.float32),
+                }
+                if readiness(self.rig, observation):
+                    return observation, frame
+            raise TimeoutError("not ready")
+
+    monkeypatch.setattr(run_closed_loop, "_marker_status", status)
+    env = DelayedRGBEnv(ready_after=1)
+    initial = {
+        "timestamp": np.float64(0.0),
+        "rgb_timestamp": np.float64(np.nan),
+        "rgb_valid": False,
+        "proprio": np.zeros(18, np.float32),
+    }
+    observation, _, warmup = run_closed_loop._initialize_marker_history(
+        env, initial, _IdentityMarkerPCA(), RDPTimeConfig(), 10)
+    assert warmup == 5
+    assert observation["timestamp"] == observation["rgb_timestamp"]
+    np.testing.assert_array_equal(observation["proprio"], np.full(18, 5))
