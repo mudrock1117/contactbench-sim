@@ -10,7 +10,13 @@ from .official import workspace_from_yaml
 
 def _load(config, checkpoint, device):
     ws = workspace_from_yaml(config, expected_stage="ldp")
-    ws.load_checkpoint(path=checkpoint, map_location=device)
+    payload = ws.load_checkpoint(path=checkpoint, map_location=device)
+    saved_cfg = payload.get("cfg") if isinstance(payload, dict) else None
+    saved_fingerprint = (saved_cfg.get("rdp_pca_fingerprint")
+                         if saved_cfg is not None else None)
+    if saved_fingerprint != ws.cfg.rdp_pca_fingerprint:
+        raise ValueError(
+            "checkpoint PCA fingerprint differs from the configured artifact")
     policy = (getattr(ws, "ema_model", None) or ws.model).to(device).eval()
     return ws, policy
 
