@@ -10,7 +10,7 @@ from force_bench.data.timebase import PolicyTimeConfig
 from force_bench.dp.transport import receive_arrays, send_arrays
 from force_bench.policy.env import ClosedLoopPolicyEnv, PolicyEnvConfig
 from force_bench.policy.evaluation import CardRetrievalPolicyEvaluator
-from .tactile import OfficialGelSightPCA, read_rig_markers
+from .tactile import load_gelsight_pca, read_rig_markers
 from .timebase import RDPTimeConfig
 
 
@@ -39,14 +39,20 @@ def main(argv=None):
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8766)
     p.add_argument("--max-fast-steps", type=int, default=600)
-    p.add_argument("--pca-transform", required=True)
-    p.add_argument("--pca-mean", required=True)
-    p.add_argument("--marker-contract", required=True,
-                   help="JSON certification of marker ordering/PCA compatibility")
+    p.add_argument("--pca-mode", choices=("official", "simulation_fitted"),
+                   default="simulation_fitted")
+    p.add_argument("--pca-artifact")
+    p.add_argument("--pca-transform")
+    p.add_argument("--pca-mean")
+    p.add_argument("--marker-contract",
+                   help="JSON certification required only for official PCA")
     a = p.parse_args(argv)
-    contract = json.loads(Path(a.marker_contract).read_text())
-    pca = OfficialGelSightPCA(
-        a.pca_transform, a.pca_mean, marker_contract=contract)
+    contract = (json.loads(Path(a.marker_contract).read_text())
+                if a.marker_contract else None)
+    pca = load_gelsight_pca(
+        mode=a.pca_mode, artifact_path=a.pca_artifact,
+        transform_path=a.pca_transform, mean_path=a.pca_mean,
+        marker_contract=contract)
     timing = RDPTimeConfig()
     env_timing = PolicyTimeConfig(
         physics_hz=60, policy_hz=24,
