@@ -68,3 +68,22 @@ def test_pressure_grid_cannot_be_projected_as_marker_data(tmp_path):
     with pytest.raises(ValueError, match=r"\[63,2\]"):
         pca.transform(np.zeros((2, 16, 16), np.float32),
                       image_width_px=240, image_height_px=320)
+
+
+def test_rdp_profiles_use_locked_official_workspaces():
+    from pathlib import Path
+    import yaml
+    root = Path(__file__).parents[1] / "config" / "rdp"
+    expected = {
+        "at_smoke.yaml": "train_at_workspace",
+        "at_paper.yaml": "train_at_workspace",
+        "ldp_smoke.yaml": "train_latent_diffusion_unet_real_image_workspace",
+        "ldp_paper.yaml": "train_latent_diffusion_unet_real_image_workspace",
+    }
+    for name, upstream in expected.items():
+        cfg = yaml.safe_load((root / name).read_text())
+        assert cfg["upstream_config"] == upstream
+        shape = cfg["config"]["shape_meta"]
+        assert shape["action"]["shape"] == [10]
+        assert shape["obs"]["tactile_marker_pca"]["shape"] == [30]
+        assert shape["obs"].get("object_pose") is None
