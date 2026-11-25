@@ -28,12 +28,26 @@ def main(argv=None):
     extended = {
         k: v.unsqueeze(0).to(a.device) for k, v in item["extended_obs"].items()}
     ratio = int(ws.cfg.dataset_obs_temporal_downsample_ratio)
-    with torch.inference_mode():
-        result = policy.predict_action(
-            obs, extended_obs_dict=extended,
-            dataset_obs_temporal_downsample_ratio=ratio)
-    action = result["action"][0].cpu().numpy()
     start = int(ws.cfg.n_obs_steps) * ratio - 1
+    n_action = int(ws.cfg.n_action_steps)
+    # Plan the slow latent once, then reproduce online causal AT decoding:
+    # action k sees marker samples only through its own 24 Hz tick.
+    with torch.inference_mode():
+        planned = policy.predict_action(
+            obs, dataset_obs_temporal_downsample_ratio=ratio,
+            return_latent_action=True)
+        latent = planned["action_pred"][:, 0]
+        decoded = []
+        for offset in range(n_action):
+            available = start + 1 + offset
+            causal = {key: value[:, :available] for key, value in extended.items()}
+            result = policy.predict_from_latent_action(
+                latent, extended_obs_dict=causal,
+                extended_obs_last_step=available,
+                dataset_obs_temporal_downsample_ratio=ratio,
+                extend_obs_pad_after=True)
+            decoded.append(result["action"][:, offset])
+        action = torch.stack(decoded, dim=1)[0].cpu().numpy()
     expert = item["action"][start:start + len(action)].numpy()
     print(json.dumps({
         "implementation": "xiaoxiaoxh/reactive_diffusion_policy@8ed82a3",
