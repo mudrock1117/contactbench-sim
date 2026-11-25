@@ -78,6 +78,33 @@ def test_pi05_config_uses_official_32d_pi05_without_delta_transform(tmp_path):
 
 
 @pytest.mark.skipif(not _upstream_available(), reason="locked OpenPI checkout required")
+def test_pi05_smoke_memory_profiles_preserve_official_contract(tmp_path):
+    from force_bench.pi05.config import make_config
+
+    smoke = make_config("smoke", exp_name="full", model_root=tmp_path)
+    no_ema = make_config("smoke_no_ema", exp_name="no_ema", model_root=tmp_path)
+    lora = make_config("smoke_lora", exp_name="lora", model_root=tmp_path)
+    paper = make_config("paper", exp_name="paper", model_root=tmp_path)
+
+    assert smoke.ema_decay == paper.ema_decay == 0.999
+    assert no_ema.ema_decay is None
+    assert lora.ema_decay is None
+    for cfg in (smoke, no_ema, lora):
+        assert cfg.batch_size == 1
+        assert cfg.num_train_steps == 10
+        assert cfg.model.pi05 is True
+        assert cfg.model.action_dim == 32
+        assert cfg.model.action_horizon == 32
+        assert cfg.weight_loader.params_path.endswith("pi05_base/params")
+    assert no_ema.model.paligemma_variant == "gemma_2b"
+    assert no_ema.model.action_expert_variant == "gemma_300m"
+    assert lora.model.paligemma_variant == "gemma_2b_lora"
+    assert lora.model.action_expert_variant == "gemma_300m_lora"
+    assert repr(lora.freeze_filter) == repr(lora.model.get_freeze_filter())
+    assert repr(no_ema.freeze_filter) == repr(no_ema.model.get_freeze_filter())
+
+
+@pytest.mark.skipif(not _upstream_available(), reason="locked OpenPI checkout required")
 def test_pi05_normalization_validation_requires_exact_10d(tmp_path):
     from force_bench.pi05.config import ASSET_ID
     from force_bench.pi05.inference import _validate_stats
