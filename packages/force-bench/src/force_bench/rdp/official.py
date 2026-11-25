@@ -56,6 +56,14 @@ def workspace_from_yaml(path: str | Path, *, expected_stage: str | None = None):
     else:
         cfg = profile
     OmegaConf.resolve(cfg)
+    dataset_cfg = cfg.task.dataset
+    if "pca_mode" in dataset_cfg:
+        from .tactile import pca_basis_fingerprint
+        cfg.rdp_pca_fingerprint = pca_basis_fingerprint(
+            mode=str(dataset_cfg.pca_mode),
+            transform_path=dataset_cfg.get("pca_transform_path"),
+            mean_path=dataset_cfg.get("pca_mean_path"),
+            artifact_path=dataset_cfg.get("pca_artifact_path"))
     output_dir = Path(str(cfg.multi_run.run_dir))
     output_dir.mkdir(parents=True, exist_ok=True)
     workspace = get_class(cfg._target_)(cfg, output_dir=str(output_dir))
