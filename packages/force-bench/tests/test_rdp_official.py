@@ -17,7 +17,21 @@ def test_rdp_offline_contract_imports_without_simulator():
 def test_rdp_12_24_60_timing_and_action_anchor():
     from force_bench.rdp.timebase import RDPTimeConfig
     cfg = RDPTimeConfig()
-    assert [cfg.physics_steps_for_fast_tick(i) for i in range(4)] == [2, 3, 2, 3]
+    first = [cfg.physics_steps_for_fast_tick(i) for i in range(4)]
+    assert first == [2, 3, 2, 3]
+    steps_24 = [cfg.physics_steps_for_fast_tick(i) for i in range(24)]
+    steps_2400 = [cfg.physics_steps_for_fast_tick(i) for i in range(2400)]
+    assert sum(steps_24) == 60
+    assert sum(steps_2400) == 6000
+    assert all(sum(steps_2400[i:i + 2]) == 5 for i in range(0, 2400, 2))
+
+    from force_bench.data.timebase import PolicyFrameScheduler, PolicyTimeConfig
+    online = PolicyFrameScheduler(PolicyTimeConfig(60, 24, 4, 32))
+    assert [online.pop() for _ in range(24)] == steps_24
+    # The established DP clock remains exactly five physics frames per action.
+    dp = PolicyFrameScheduler(PolicyTimeConfig(60, 12, 2, 16))
+    assert [dp.pop() for _ in range(24)] == [5] * 24
+
     query = cfg.fast_query_times(1.0)
     assert query.shape == (32,)
     assert query[cfg.action_start_index] == pytest.approx(1.0)
@@ -87,3 +101,19 @@ def test_rdp_profiles_use_locked_official_workspaces():
         assert shape["action"]["shape"] == [10]
         assert shape["obs"]["tactile_marker_pca"]["shape"] == [30]
         assert shape["obs"].get("object_pose") is None
+
+
+def test_marker_window_filter_keeps_valid_no_contact_and_rejects_missing():
+    from force_bench.rdp.tactile import marker_window_indices
+    timestamps = np.arange(8, dtype=np.float64) / 24.0
+    query = timestamps[2:6]
+    valid = np.ones((8, 2), dtype=bool)
+    # Displacement magnitude is intentionally absent from this decision:
+    # valid zero/no-contact marker samples are retained.
+    indices = marker_window_indices(timestamps, valid, query)
+    np.testing.assert_array_equal(indices, np.arange(2, 6))
+
+    valid[4, 1] = False
+    assert marker_window_indices(timestamps, valid, query) is None
+    assert marker_window_indices(timestamps, np.ones((8, 2), bool),
+                                 np.array([-1.0 / 24.0])) is None
