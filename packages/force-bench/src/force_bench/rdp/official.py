@@ -43,8 +43,18 @@ def workspace_from_yaml(path: str | Path, *, expected_stage: str | None = None):
     """Instantiate an unmodified upstream AT or LDP workspace."""
     activate_upstream()
     from hydra.utils import get_class
+    from hydra import compose, initialize_config_dir
     from omegaconf import OmegaConf
-    cfg = OmegaConf.load(path)
+    profile = OmegaConf.load(path)
+    if "upstream_config" in profile:
+        upstream_root = activate_upstream()
+        with initialize_config_dir(
+                version_base=None,
+                config_dir=str(upstream_root / "reactive_diffusion_policy" / "config")):
+            cfg = compose(config_name=str(profile.upstream_config))
+        cfg = OmegaConf.merge(cfg, profile.get("config", {}))
+    else:
+        cfg = profile
     OmegaConf.resolve(cfg)
     output_dir = Path(str(cfg.multi_run.run_dir))
     output_dir.mkdir(parents=True, exist_ok=True)
