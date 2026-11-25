@@ -29,11 +29,14 @@ class PolicyTimeConfig:
         return int(round(ratio))
 
     def physics_frames_for_step(self, step):
-        """Causal integer frame span; 60/24 Hz alternates 3,2 frames."""
+        """Causal integer frame span; 60/24 Hz alternates 2,3 frames."""
         if int(step) != step or step < 0:
             raise ValueError("step must be a nonnegative integer")
         ratio = self.physics_hz / self.policy_hz
-        edge = lambda value: int(np.floor(value * ratio + 0.5))
+        # Cumulative floor edges match timestamp intervals [k/f, (k+1)/f)
+        # and avoid round-to-even. Integer ratios (including DP 60/12=5)
+        # are unchanged.
+        edge = lambda value: int(np.floor(value * ratio + 1.0e-12))
         return edge(step + 1) - edge(step)
 
 
