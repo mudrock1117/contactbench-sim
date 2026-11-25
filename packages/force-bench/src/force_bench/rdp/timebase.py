@@ -55,7 +55,10 @@ class RDPTimeConfig:
         return fast[::-2][::-1]
 
     def physics_steps_for_fast_tick(self, tick: int) -> int:
-        # Bresenham schedule for non-integral 60/24 = 2.5: 3,2,3,2...
-        a = round((tick + 1) * self.physics_hz / self.fast_action_hz)
-        b = round(tick * self.physics_hz / self.fast_action_hz)
-        return int(a - b)
+        if int(tick) != tick or tick < 0:
+            raise ValueError("tick must be a nonnegative integer")
+        # Difference of cumulative floor edges: 60/24 = 2.5 produces
+        # 2,3,2,3... without Python round()'s ties-to-even phase changes.
+        ratio = self.physics_hz / self.fast_action_hz
+        edge = lambda value: int(np.floor(value * ratio + 1.0e-12))
+        return edge(tick + 1) - edge(tick)
