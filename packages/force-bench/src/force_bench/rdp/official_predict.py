@@ -5,6 +5,7 @@ import json
 import numpy as np
 import torch
 from hydra.utils import instantiate
+from .checkpoint import restore_workspace_normalizers
 from .official import workspace_from_yaml
 
 
@@ -17,6 +18,9 @@ def _load(config, checkpoint, device):
     if saved_fingerprint != ws.cfg.rdp_pca_fingerprint:
         raise ValueError(
             "checkpoint PCA fingerprint differs from the configured artifact")
+    # Upstream VAE.state_dict() omits its normalizer.  Restore the nested AT
+    # from each serialized parent LDP normalizer before selecting model/EMA.
+    restore_workspace_normalizers(ws)
     policy = (getattr(ws, "ema_model", None) or ws.model).to(device).eval()
     return ws, policy
 
