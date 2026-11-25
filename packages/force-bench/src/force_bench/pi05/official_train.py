@@ -11,7 +11,7 @@ from .official import activate_openpi
 
 def main(argv=None):
     p = argparse.ArgumentParser()
-    p.add_argument("--profile", choices=("smoke", "paper"), required=True)
+    p.add_argument("--profile", choices=("smoke", "smoke_no_ema", "smoke_lora", "paper"), required=True)
     p.add_argument("--exp-name", required=True)
     p.add_argument("--data", default=str(DEFAULT_DATA))
     p.add_argument("--model-root", default=str(DEFAULT_MODEL_ROOT))
