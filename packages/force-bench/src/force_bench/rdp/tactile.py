@@ -36,7 +36,7 @@ def marker_metadata(*, official_pca_compatible: bool = False) -> dict:
     }
 
 
-def frame_marker_displacement(frame, *, writer=None) -> np.ndarray:
+def frame_marker_displacement(frame, *, projector=None) -> np.ndarray:
     """Return [63,2] (x right, y down) displacement in image pixels."""
     if not hasattr(frame, "shear_displacement_m") or not hasattr(frame, "normal_displacement_m"):
         raise TypeError("frame lacks physical GelSight displacement fields")
@@ -44,12 +44,25 @@ def frame_marker_displacement(frame, *, writer=None) -> np.ndarray:
     normal = np.asarray(frame.normal_displacement_m, dtype=np.float32)
     if shear.ndim != 3 or shear.shape[0] != 2 or normal.shape != shear.shape[1:]:
         raise ValueError("invalid Hydrogel displacement field shapes")
-    # Lazy import: collection/simulation has Hydrogel; offline PCA users do not.
-    from hydrogel.render import TactileTileWriter, marker_grid, raster_to_image
+    # This path never constructs the optical Taxim renderer. Marker mechanics
+    # remain available when RGB/video rendering is disabled.
+    from hydrogel.render import (
+        GS_H, GS_W, MARKER_MODEL, advect_markers, marker_grid,
+        project_markers, raster_to_image)
+    from hydrogel.markers import HydroShearMarkers, field_markers
     rest_hw = np.asarray(marker_grid(), dtype=np.float32)
     height = raster_to_image(normal)
-    writer = writer or TactileTileWriter()
-    current_hw = np.asarray(writer.marker_positions(height, shear), dtype=np.float32)
+    if MARKER_MODEL == "local":
+        current_hw = project_markers(advect_markers(shear, rest_hw), height)
+    elif MARKER_MODEL == "hydroshear":
+        if projector is None:
+            projector = HydroShearMarkers(
+                rest_hw, (GS_H, GS_W), (0.0186, 0.0143))
+        current_hw = project_markers(projector.displace(height, shear)[0], height)
+    else:
+        current_hw = project_markers(
+            field_markers(rest_hw, shear, (GS_H, GS_W)), height)
+    current_hw = np.asarray(current_hw, dtype=np.float32)
     if rest_hw.shape != (MARKER_COUNT, 2) or current_hw.shape != rest_hw.shape:
         raise ValueError("Hydrogel marker model is not the required 9x7 grid")
     delta_hw = current_hw - rest_hw
@@ -59,16 +72,19 @@ def frame_marker_displacement(frame, *, writer=None) -> np.ndarray:
 
 def read_rig_markers(rig) -> tuple[np.ndarray, np.ndarray]:
     values = np.zeros((2, MARKER_COUNT, 2), dtype=np.float32)
-    writer = getattr(rig, "_rdp_marker_writer", None)
-    if writer is None:
-        from hydrogel.render import TactileTileWriter
-        writer = TactileTileWriter()
-        rig._rdp_marker_writer = writer
+    projector = getattr(rig, "_rdp_marker_projector", None)
+    if projector is None:
+        from hydrogel.markers import HydroShearMarkers
+        from hydrogel.render import GS_H, GS_W, marker_grid
+        projector = HydroShearMarkers(
+            marker_grid(), (GS_H, GS_W), (0.0186, 0.0143))
+        rig._rdp_marker_projector = projector
     valid = np.zeros(2, dtype=bool)
     for index, pad in enumerate(PAD_ORDER):
         frames = getattr(rig, "tactile_frames", {}).get(pad, ())
         if frames:
-            values[index] = frame_marker_displacement(frames[-1], writer=writer)
+            values[index] = frame_marker_displacement(
+                frames[-1], projector=projector)
             valid[index] = bool(np.isfinite(values[index]).all())
     return values, valid
 
