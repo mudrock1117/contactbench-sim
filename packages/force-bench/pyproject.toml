@@ -51,6 +51,9 @@ dev = ["pytest>=8", "ruff>=0.6"]
 # Installed only in the isolated contactbench-dp environment.  The simulator
 # environment deliberately remains free of PyTorch and diffusers.
 dp = ["torch>=2.5", "torchvision>=0.20", "diffusers>=0.31", "pytest>=8"]
+# Training-only dependencies; the exact torch/cu117 pair is installed separately
+# according to environments/contactbench-rdp.yaml and upstream 8ed82a3.
+rdp = ["numpy==1.26.4", "hydra-core", "omegaconf", "einops", "diffusers", "accelerate", "wandb", "scikit-learn", "pytest>=8"]
 
 [project.scripts]
 force-bench = "force_bench.cli:main"
