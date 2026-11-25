@@ -66,6 +66,26 @@ class ContactBenchOfficialRDPDataset(BaseImageDataset):
         if self.at is not None:
             self.at.eval()
         self.use_latent_action_before_vq = bool(use_latent_action_before_vq)
+        before = len(self.base.samples)
+        self.base.samples = [
+            pair for pair in self.base.samples if self._marker_window_valid(*pair)]
+        self.filtered_invalid_marker_windows = before - len(self.base.samples)
+        if not self.base.samples:
+            raise ValueError("no RDP windows have a complete valid marker history")
+
+    def _marker_window_valid(self, episode_index, anchor):
+        """Validity is sensor availability, never contact/nonzero pressure."""
+        item = self.base.episodes[episode_index]
+        ep = item["episode"]
+        anchor_s = float(item["policy_ticks"][anchor])
+        query = self.time.fast_query_times(anchor_s)
+        marker_times = np.asarray(ep["timestamps"][1:], dtype=np.float64)
+        indices = causal_indices(marker_times, query)
+        valid = np.asarray(ep["tactile_marker_valid"], dtype=bool)
+        if np.any(indices < 0) or np.any(indices >= len(valid)):
+            return False
+        # A valid all-zero displacement is an important no-contact sample.
+        return bool(np.all(valid[indices]))
 
     def __len__(self):
         return len(self.base)
