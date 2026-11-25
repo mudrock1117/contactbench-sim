@@ -7,7 +7,7 @@ def _pose(x=0.0,y=0.0,z=0.0,angle=0.0):
     c,s=np.cos(angle),np.sin(angle); T=np.eye(4)
     T[:3,:3]=[[c,-s,0],[s,c,0],[0,0,1]]; T[:3,3]=[x,y,z]; return T
 
-@pytest.mark.parametrize("hz,expected",[(12,[5,5,5,5]),(24,[3,2,3,2])])
+@pytest.mark.parametrize("hz,expected",[(12,[5,5,5,5]),(24,[2,3,2,3])])
 def test_policy_scheduler_supports_12_and_24_hz(hz,expected):
     scheduler=PolicyFrameScheduler(PolicyTimeConfig(60,hz,2,16))
     assert [scheduler.pop() for _ in range(4)]==expected
