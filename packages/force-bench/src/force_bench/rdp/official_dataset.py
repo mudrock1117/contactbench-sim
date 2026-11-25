@@ -11,7 +11,7 @@ from force_bench.dp.official_dataset import _pose_matrix
 from force_bench.dp.official_contract import validate_eef_episode_arrays
 from force_bench.robot.eef_action import encode_relative_eef, relative_eef_history
 from .official import activate_upstream
-from .tactile import OfficialGelSightPCA, marker_window_indices
+from .tactile import load_gelsight_pca, marker_window_indices
 from .timebase import RDPTimeConfig
 
 activate_upstream()
@@ -26,7 +26,8 @@ class ContactBenchOfficialRDPDataset(BaseImageDataset):
     REQUIRED_MARKER_FIELDS = (
         "tactile_marker_displacement_px", "tactile_marker_valid")
 
-    def __init__(self, data_path, pca_transform_path, pca_mean_path,
+    def __init__(self, data_path, pca_transform_path=None, pca_mean_path=None,
+                 pca_mode="official", pca_artifact_path=None,
                  observation_horizon=2, horizon=32, success_only=True,
                  seed=0, val_ratio=0.0, at=None,
                  use_latent_action_before_vq=False):
@@ -48,6 +49,10 @@ class ContactBenchOfficialRDPDataset(BaseImageDataset):
         self.base = EpisodeWindowDataset(paths, spec)
         self.episodes = {}
         self.pca = {}
+        self.pca_mode = str(pca_mode)
+        shared_pca = (load_gelsight_pca(
+            mode=self.pca_mode, artifact_path=pca_artifact_path)
+            if self.pca_mode == "simulation_fitted" else None)
         for path in paths:
             ep = load_episode(path)
             validate_eef_episode_arrays(ep.arrays, len(ep["actions"]))
@@ -56,8 +61,17 @@ class ContactBenchOfficialRDPDataset(BaseImageDataset):
                 raise ValueError(
                     f"{path}: missing {missing}; pressure grids are not marker displacement")
             contract = ep.metadata.get("tactile_markers", {})
-            self.pca[str(ep.metadata["episode_id"])] = OfficialGelSightPCA(
-                pca_transform_path, pca_mean_path, marker_contract=contract)
+            if self.pca_mode == "official":
+                pca = load_gelsight_pca(
+                    mode="official", transform_path=pca_transform_path,
+                    mean_path=pca_mean_path, marker_contract=contract)
+            else:
+                artifact_contract = shared_pca.manifest["marker_contract"]
+                for key in ("shape", "components", "image_size_px", "marker_ordering"):
+                    if contract.get(key) != artifact_contract.get(key):
+                        raise ValueError(f"{path}: marker contract differs from PCA artifact: {key}")
+                pca = shared_pca
+            self.pca[str(ep.metadata["episode_id"])] = pca
             self.episodes[str(ep.metadata["episode_id"])] = ep
         self.horizon = int(horizon)
         self.seed = int(seed)
