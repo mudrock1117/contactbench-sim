@@ -6,6 +6,8 @@ force-filled surrogate is accepted.
 """
 from __future__ import annotations
 from pathlib import Path
+import hashlib
+import json
 import numpy as np
 
 MARKER_COUNT = 63
@@ -143,3 +145,78 @@ class OfficialGelSightPCA:
         normalized[..., 1] /= float(image_height_px)
         flat = normalized.reshape(*normalized.shape[:-2], MARKER_COUNT * 2)
         return ((flat - self.mean) @ self.W).astype(np.float32)
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class SimulationFittedGelSightPCA:
+    """Per-pad PCA fitted only from ContactBench training marker data."""
+
+    FORMAT_VERSION = 1
+
+    def __init__(self, artifact_dir: str | Path):
+        self.artifact_dir = Path(artifact_dir)
+        manifest_path = self.artifact_dir / "manifest.json"
+        self.manifest = json.loads(manifest_path.read_text())
+        if self.manifest.get("format_version") != self.FORMAT_VERSION:
+            raise ValueError("unsupported simulation PCA artifact version")
+        if self.manifest.get("mode") != "simulation_fitted":
+            raise ValueError("PCA artifact is not simulation_fitted")
+        contract = self.manifest.get("marker_contract", {})
+        expected = marker_metadata(official_pca_compatible=False)
+        for key in ("shape", "components", "image_size_px", "marker_ordering"):
+            if contract.get(key) != expected[key]:
+                raise ValueError(f"simulation PCA marker contract mismatch: {key}")
+        if self.manifest.get("normalization") != {
+                "x": "divide_by_image_width_px",
+                "y": "divide_by_image_height_px"}:
+            raise ValueError("simulation PCA normalization contract mismatch")
+        self.means, self.W = [], []
+        hashes = self.manifest.get("sha256", {})
+        for side in ("left", "right"):
+            mean_path = self.artifact_dir / f"{side}_mean.npy"
+            transform_path = self.artifact_dir / f"{side}_transform.npy"
+            for value in (mean_path, transform_path):
+                if hashes.get(value.name) != _sha256(value):
+                    raise ValueError(f"simulation PCA checksum mismatch: {value.name}")
+            mean = np.load(mean_path, allow_pickle=False)
+            transform = np.load(transform_path, allow_pickle=False)
+            if mean.shape != (MARKER_COUNT * 2,) or transform.shape != (MARKER_COUNT * 2, 15):
+                raise ValueError(f"invalid simulation PCA arrays for {side}")
+            self.means.append(mean.astype(np.float32))
+            self.W.append(transform.astype(np.float32))
+        self.means = np.stack(self.means)
+        self.W = np.stack(self.W)
+
+    def transform(self, displacement_px: np.ndarray,
+                  *, image_width_px: int, image_height_px: int) -> np.ndarray:
+        value = np.asarray(displacement_px, dtype=np.float32)
+        if value.shape[-3:] != (2, MARKER_COUNT, 2):
+            raise ValueError("dual marker displacement must end in [2,63,2]")
+        manifest_size = self.manifest["marker_contract"]["image_size_px"]
+        if [int(image_width_px), int(image_height_px)] != manifest_size:
+            raise ValueError("runtime image size differs from simulation PCA fit")
+        normalized = value.copy()
+        normalized[..., 0] /= float(image_width_px)
+        normalized[..., 1] /= float(image_height_px)
+        flat = normalized.reshape(*normalized.shape[:-2], MARKER_COUNT * 2)
+        return np.einsum("...sd,sdk->...sk", flat - self.means, self.W).astype(np.float32)
+
+
+def load_gelsight_pca(*, mode: str, marker_contract: dict | None = None,
+                      transform_path: str | Path | None = None,
+                      mean_path: str | Path | None = None,
+                      artifact_path: str | Path | None = None):
+    """Single PCA construction point shared by training and deployment."""
+    if mode == "official":
+        if transform_path is None or mean_path is None or marker_contract is None:
+            raise ValueError("official PCA requires transform, mean and certified marker contract")
+        return OfficialGelSightPCA(
+            transform_path, mean_path, marker_contract=marker_contract)
+    if mode == "simulation_fitted":
+        if artifact_path is None:
+            raise ValueError("simulation_fitted PCA requires an artifact directory")
+        return SimulationFittedGelSightPCA(artifact_path)
+    raise ValueError("pca_mode must be official or simulation_fitted")
