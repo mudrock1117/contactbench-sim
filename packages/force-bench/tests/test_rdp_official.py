@@ -106,6 +106,51 @@ def test_rdp_profiles_use_locked_official_workspaces():
         assert "pca_artifact_path" in dataset
 
 
+@pytest.mark.parametrize(
+    ("profile_name", "expected_obs"),
+    [
+        ("at_smoke.yaml", {"agent_pos", "tactile_marker_pca"}),
+        ("ldp_smoke.yaml", {"wrist_rgb", "agent_pos", "tactile_marker_pca"}),
+    ],
+)
+def test_rdp_hydra_profile_replaces_structured_task_contract(
+        monkeypatch, profile_name, expected_obs):
+    from pathlib import Path
+    from omegaconf import OmegaConf
+    from force_bench.rdp.official import compose_profile_config, repository_root
+
+    upstream = repository_root() / "third_party" / "reactive_diffusion_policy"
+    if not upstream.is_dir():
+        pytest.skip("locked RDP checkout is required for Hydra composition")
+    monkeypatch.setenv("TB_RDP_AT_CHECKPOINT", "/tmp/contactbench-at.ckpt")
+    root = Path(__file__).parents[1] / "config" / "rdp"
+    cfg = compose_profile_config(root / profile_name)
+
+    assert OmegaConf.is_struct(cfg) is False
+    assert set(cfg.shape_meta.obs.keys()) == expected_obs
+    assert list(cfg.shape_meta.obs.agent_pos.shape) == [10]
+    assert list(cfg.shape_meta.obs.tactile_marker_pca.shape) == [30]
+    if "wrist_rgb" in expected_obs:
+        assert list(cfg.shape_meta.obs.wrist_rgb.shape) == [3, 240, 320]
+    assert list(cfg.shape_meta.action.shape) == [10]
+    assert OmegaConf.to_container(cfg.task.shape_meta, resolve=True) == (
+        OmegaConf.to_container(cfg.shape_meta, resolve=True))
+    assert OmegaConf.to_container(cfg.policy.shape_meta, resolve=True) == (
+        OmegaConf.to_container(cfg.shape_meta, resolve=True))
+
+    dataset = cfg.task.dataset
+    assert dataset._target_ == (
+        "force_bench.rdp.official_dataset.ContactBenchOfficialRDPDataset")
+    assert int(dataset.observation_horizon) == 2
+    assert int(dataset.horizon) == 32
+    assert int(dataset.obs_temporal_downsample_ratio) == 2
+    assert "env_runner" not in cfg.task
+    for stale in ("dataset_path", "pad_before", "pad_after", "use_cache"):
+        assert stale not in dataset
+    assert int(cfg.horizon) == 32
+    assert int(cfg.n_obs_steps) == 2
+
+
 def test_marker_window_filter_keeps_valid_no_contact_and_rejects_missing():
     from force_bench.rdp.tactile import marker_window_indices
     timestamps = np.arange(8, dtype=np.float64) / 24.0
