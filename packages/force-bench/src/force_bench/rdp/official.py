@@ -39,23 +39,97 @@ def activate_upstream(*, verify: bool = True) -> Path:
     return path
 
 
+def _detached(value, OmegaConf):
+    """Copy a config subtree without inherited Hydra struct flags."""
+    return OmegaConf.create(OmegaConf.to_container(value, resolve=False))
+
+
+def _validate_contactbench_profile(cfg, upstream_config):
+    from omegaconf import OmegaConf
+    shape = OmegaConf.to_container(cfg.shape_meta, resolve=True)
+    expected_obs = (
+        {"agent_pos": {"shape": [10], "type": "low_dim"},
+         "tactile_marker_pca": {"shape": [30], "type": "low_dim"}}
+        if upstream_config == "train_at_workspace" else
+        {"wrist_rgb": {"shape": [3, 240, 320], "type": "rgb"},
+         "agent_pos": {"shape": [10], "type": "low_dim"},
+         "tactile_marker_pca": {"shape": [30], "type": "low_dim"}})
+    if shape["obs"] != expected_obs:
+        raise ValueError(f"unexpected ContactBench RDP observation contract: {shape['obs']}")
+    if shape.get("extended_obs") != {
+            "tactile_marker_pca": {"shape": [30], "type": "low_dim"}}:
+        raise ValueError("RDP extended observation must be the 30D dual-pad PCA")
+    if shape.get("action") != {"shape": [10]}:
+        raise ValueError("RDP action contract must be 10D")
+    if OmegaConf.to_container(cfg.task.shape_meta, resolve=True) != shape:
+        raise ValueError("task and top-level shape_meta differ")
+    if OmegaConf.to_container(cfg.policy.shape_meta, resolve=True) != shape:
+        raise ValueError("policy and top-level shape_meta differ")
+    dataset = cfg.task.dataset
+    if dataset._target_ != (
+            "force_bench.rdp.official_dataset.ContactBenchOfficialRDPDataset"):
+        raise ValueError("profile did not replace the upstream dataset")
+    allowed = {
+        "_target_", "data_path", "pca_transform_path", "pca_mean_path",
+        "pca_mode", "pca_artifact_path", "observation_horizon", "horizon",
+        "obs_temporal_downsample_ratio", "success_only", "seed", "val_ratio",
+        "at", "use_latent_action_before_vq"}
+    leftovers = set(dataset.keys()) - allowed
+    if leftovers:
+        raise ValueError(f"upstream dataset fields survived replacement: {sorted(leftovers)}")
+    if int(dataset.observation_horizon) != 2 or int(dataset.horizon) != 32:
+        raise ValueError("RDP dataset horizons must be obs=2, action=32")
+    if int(dataset.obs_temporal_downsample_ratio) != 2:
+        raise ValueError("RDP dataset must downsample 24 Hz observations to 12 Hz")
+    if int(cfg.horizon) != 32 or int(cfg.n_obs_steps) != 2:
+        raise ValueError("official RDP model horizons differ from ContactBench")
+    if "env_runner" in cfg.task:
+        raise ValueError("real-robot env_runner survived ContactBench task replacement")
+
+
+def compose_profile_config(path: str | Path):
+    """Compose upstream defaults, then replace ContactBench contract subtrees."""
+    upstream_root = activate_upstream()
+    from hydra import compose, initialize_config_dir
+    from omegaconf import OmegaConf
+    # Both pinned workspaces register this resolver only when their Python
+    # modules are imported. Composition happens earlier, so register it here.
+    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    profile = OmegaConf.load(path)
+    if "upstream_config" not in profile:
+        cfg = _detached(profile, OmegaConf)
+        OmegaConf.resolve(cfg)
+        return cfg
+    upstream_config = str(profile.upstream_config)
+    with initialize_config_dir(
+            version_base=None,
+            config_dir=str(upstream_root / "reactive_diffusion_policy" / "config")):
+        composed = compose(config_name=upstream_config)
+    # Recreate both trees to remove Hydra's inherited struct restrictions.
+    cfg = _detached(composed, OmegaConf)
+    overlay = _detached(profile.get("config", {}), OmegaConf)
+    OmegaConf.set_struct(cfg, False)
+    OmegaConf.set_struct(overlay, False)
+    cfg = OmegaConf.merge(cfg, overlay)
+
+    # Recursive merge is correct for official model/training overrides, but
+    # these schemas describe a different task and must never retain old keys.
+    for key in ("shape_meta", "task"):
+        if key in overlay:
+            cfg[key] = _detached(overlay[key], OmegaConf)
+    if "policy" in overlay and "shape_meta" in overlay.policy:
+        cfg.policy.shape_meta = _detached(overlay.policy.shape_meta, OmegaConf)
+
+    OmegaConf.resolve(cfg)
+    _validate_contactbench_profile(cfg, upstream_config)
+    return cfg
+
+
 def workspace_from_yaml(path: str | Path, *, expected_stage: str | None = None):
     """Instantiate an unmodified upstream AT or LDP workspace."""
     activate_upstream()
     from hydra.utils import get_class
-    from hydra import compose, initialize_config_dir
-    from omegaconf import OmegaConf
-    profile = OmegaConf.load(path)
-    if "upstream_config" in profile:
-        upstream_root = activate_upstream()
-        with initialize_config_dir(
-                version_base=None,
-                config_dir=str(upstream_root / "reactive_diffusion_policy" / "config")):
-            cfg = compose(config_name=str(profile.upstream_config))
-        cfg = OmegaConf.merge(cfg, profile.get("config", {}))
-    else:
-        cfg = profile
-    OmegaConf.resolve(cfg)
+    cfg = compose_profile_config(path)
     dataset_cfg = cfg.task.dataset
     if "pca_mode" in dataset_cfg:
         from .tactile import pca_basis_fingerprint
