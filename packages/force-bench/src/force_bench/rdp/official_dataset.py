@@ -105,6 +105,8 @@ class ContactBenchOfficialRDPDataset(BaseImageDataset):
 
         marker_times = np.asarray(ep["timestamps"][1:], dtype=np.float64)
         marker_idx = causal_indices(marker_times, query)
+        if np.any(marker_idx < 0):
+            raise IndexError("RDP marker window precedes the first causal tactile frame")
         marker = np.asarray(ep["tactile_marker_displacement_px"])[marker_idx]
         marker_valid = np.asarray(ep["tactile_marker_valid"])[marker_idx]
         if not np.all(marker_valid):
