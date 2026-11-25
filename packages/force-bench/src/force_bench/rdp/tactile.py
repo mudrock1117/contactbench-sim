@@ -36,6 +36,24 @@ def marker_metadata(*, official_pca_compatible: bool = False) -> dict:
     }
 
 
+def marker_window_indices(marker_timestamps, marker_valid, query_timestamps):
+    """Return causal indices, or None when any required sensor sample is invalid.
+
+    Validity is independent of displacement magnitude: all-zero no-contact
+    marker observations remain valid.
+    """
+    from force_bench.data.timebase import causal_indices
+    timestamps = np.asarray(marker_timestamps, dtype=np.float64)
+    query = np.asarray(query_timestamps, dtype=np.float64)
+    valid = np.asarray(marker_valid, dtype=bool)
+    if valid.ndim != 2 or valid.shape[1] != 2 or len(valid) != len(timestamps):
+        raise ValueError("marker validity must have shape [N,2] aligned to timestamps")
+    indices = causal_indices(timestamps, query)
+    if np.any(indices < 0) or np.any(indices >= len(valid)):
+        return None
+    return indices if np.all(valid[indices]) else None
+
+
 def frame_marker_displacement(frame, *, projector=None) -> np.ndarray:
     """Return [63,2] (x right, y down) displacement in image pixels."""
     if not hasattr(frame, "shear_displacement_m") or not hasattr(frame, "normal_displacement_m"):
