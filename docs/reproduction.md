@@ -400,3 +400,72 @@ Static checks:
 python -m compileall -q packages/force-bench/src/force_bench/pi05
 pytest -q packages/force-bench/tests/test_pi05_official.py
 ```
+
+
+### RTX 4090 smoke memory profiles
+
+The original `smoke` and `paper` profiles are unchanged. Two explicitly
+labelled alternatives are available for the 49.97 GiB JAX initialization OOM:
+
+- `smoke_no_ema` is still full-parameter fine-tuning. It is identical to
+  `smoke` except that `ema_decay=None`, so the train state does not retain a
+  second complete EMA parameter tree. The locked checkpoint code saves ordinary
+  parameters when EMA is absent, and the standard policy loader restores the
+  same `params` item for inference.
+- `smoke_lora` is an engineering fallback, not the paper full-fine-tuning
+  protocol. It uses the locked OpenPI variants `gemma_2b_lora` and
+  `gemma_300m_lora`, the matching
+  `Pi0Config.get_freeze_filter()`, the official
+  `CheckpointWeightLoader` (which initializes only missing `.*lora.*`
+  parameters), and `ema_decay=None`. Data, normalization, prompt, 24 Hz
+  timing, 32-step horizon, internal 32D padding and physical 10D output remain
+  identical.
+
+Full-parameter smoke without EMA:
+
+```bash
+third_party/openpi/.venv/bin/python -m force_bench.pi05.official_train \
+  --profile smoke_no_ema --exp-name card_no_ema \
+  --data outputs/datasets/card_multimodal_a4 \
+  --model-root /home/zdh/contactbench_models/pi05 --overwrite
+
+PI05_CKPT=/home/zdh/contactbench_models/pi05/checkpoints/contactbench_pi05_smoke_no_ema/card_no_ema/9
+third_party/openpi/.venv/bin/python -m force_bench.pi05.official_predict \
+  --profile smoke_no_ema --checkpoint "$PI05_CKPT" \
+  --data outputs/datasets/card_multimodal_a4 \
+  --model-root /home/zdh/contactbench_models/pi05
+third_party/openpi/.venv/bin/python -m force_bench.pi05.official_server \
+  --profile smoke_no_ema --checkpoint "$PI05_CKPT" \
+  --data outputs/datasets/card_multimodal_a4 \
+  --model-root /home/zdh/contactbench_models/pi05 \
+  --host 127.0.0.1 --port 8767
+```
+
+Official OpenPI LoRA smoke fallback:
+
+```bash
+third_party/openpi/.venv/bin/python -m force_bench.pi05.official_train \
+  --profile smoke_lora --exp-name card_lora \
+  --data outputs/datasets/card_multimodal_a4 \
+  --model-root /home/zdh/contactbench_models/pi05 --overwrite
+
+PI05_CKPT=/home/zdh/contactbench_models/pi05/checkpoints/contactbench_pi05_smoke_lora/card_lora/9
+third_party/openpi/.venv/bin/python -m force_bench.pi05.official_predict \
+  --profile smoke_lora --checkpoint "$PI05_CKPT" \
+  --data outputs/datasets/card_multimodal_a4 \
+  --model-root /home/zdh/contactbench_models/pi05
+third_party/openpi/.venv/bin/python -m force_bench.pi05.official_server \
+  --profile smoke_lora --checkpoint "$PI05_CKPT" \
+  --data outputs/datasets/card_multimodal_a4 \
+  --model-root /home/zdh/contactbench_models/pi05 \
+  --host 127.0.0.1 --port 8767
+```
+
+For either server, closed-loop execution remains:
+
+```bash
+conda activate contactbench
+python -m force_bench.pi05.run_closed_loop \
+  --scene retrieve_card_from_deck --host 127.0.0.1 --port 8767 \
+  --execution-horizon 8 --max-fast-steps 24
+```
