@@ -113,3 +113,112 @@ This same boundary is intended for the later RDP, pi0.5 and FTP-1 dataset adapte
 
     python -c "from force_bench.data.dataset import EpisodeWindowDataset; from force_bench.robot.eef_action import encode_relative_eef; print('offline imports ok')"
     pytest -q packages/force-bench/tests/test_offline_dependency_isolation.py
+
+
+## B2 — official Reactive Diffusion Policy
+
+B2 is locked to `xiaoxiaoxh/reactive_diffusion_policy@8ed82a3`.  The
+`force_bench.rdp` package is adapter code only: AT is the upstream
+`VAE`, LDP is the upstream `LatentDiffusionUnetImagePolicy`, and training
+uses the two upstream workspaces.  Third-party sources are never patched.
+
+### Time and tensor contract
+
+- physics: 60 Hz;
+- fast action/tactile axis: 24 Hz (physics frames alternate 2 and 3);
+- slow visual/latent planning: 12 Hz;
+- two causal slow observations are selected from four 24 Hz slots with the
+  upstream `[::-2][::-1]` rule, ending at the current anchor;
+- AT horizon: 32 fast samples; the official action slice starts at index
+  `2 * 2 - 1 = 3`;
+- 10-D action: fixed-chunk-anchor relative EEF translation (m), rotation 6D,
+  and absolute gripper width (m);
+- observation: wrist RGB `[2,3,240,320]`, relative EEF state `[2,10]`,
+  and two independent 15-D GelSight PCA embeddings `[2,30]`;
+- AT's RNN decoder receives causal 24 Hz marker embeddings.  Online inference
+  plans one latent at 12 Hz, then decodes one action at each of two 24 Hz
+  ticks using only marker samples available at that tick.
+
+### Marker/PCA compatibility gate
+
+Hydrogel exposes physical normal and shear displacement, from which collection
+can record the two 9x7 marker grids as
+`tactile_marker_displacement_px [action,2,63,2]`. Components are image
+`(x right, y down)`, in pixels; rows are ordered by the simulator's fixed
+9x7 row-major identities. Set `TB_COLLECT_TACTILE_MARKERS=1` to enable it.
+
+The official PCA files are present and have the expected affine contract:
+normalized `[63*2]` offsets, `(x/width,y/height)`, then
+`(x - mean) @ W -> 15D`. However, upstream does not document that its real
+marker detector's IDs use the simulator's row-major ordering. Existing
+ContactBench episodes contain pressure grids, not marker displacement.
+Therefore newly collected metadata defaults
+`official_pca_compatible=false`, and the official dataset fails closed.
+A reviewed JSON contract setting this true is required only after a calibration
+sequence has established marker-ID correspondence. Pressure is never accepted
+as marker motion, and no random tactile feature is generated.
+
+### Isolated environment
+
+```bash
+conda env create -f environments/contactbench-rdp.yaml
+conda activate contactbench-rdp
+pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 \
+  torchaudio==0.13.1 --extra-index-url https://download.pytorch.org/whl/cu117
+pip install -e packages/force-bench --no-deps
+python scripts/fetch_upstreams.py --name reactive_diffusion_policy
+```
+
+The simulator remains in the separate `contactbench` environment.  The
+socket server is the boundary between PyTorch/cu117 and Warp/Newton.
+
+### Commands (run only after the marker contract is certified)
+
+```bash
+export TB_RDP_DATASET=outputs/datasets/card_multimodal_rdp
+export TB_RDP_UPSTREAM=third_party/reactive_diffusion_policy
+
+# AT smoke, then paper-oriented training
+python -m force_bench.rdp.official_train --stage at \
+  --config packages/force-bench/config/rdp/at_smoke.yaml
+python -m force_bench.rdp.official_train --stage at \
+  --config packages/force-bench/config/rdp/at_paper.yaml
+
+export TB_RDP_AT_CHECKPOINT=outputs/rdp/at_smoke/checkpoints/latest.ckpt
+python -m force_bench.rdp.official_train --stage ldp \
+  --config packages/force-bench/config/rdp/ldp_smoke.yaml
+python -m force_bench.rdp.official_train --stage ldp \
+  --config packages/force-bench/config/rdp/ldp_paper.yaml
+
+python -m force_bench.rdp.official_predict \
+  --config packages/force-bench/config/rdp/ldp_smoke.yaml \
+  --checkpoint outputs/rdp/ldp_smoke/checkpoints/latest.ckpt
+
+python -m force_bench.rdp.official_server \
+  --config packages/force-bench/config/rdp/ldp_smoke.yaml \
+  --checkpoint outputs/rdp/ldp_smoke/checkpoints/latest.ckpt --port 8766
+```
+
+In the simulation environment:
+
+```bash
+TB_GELSIGHT=1 python -m force_bench.rdp.run_closed_loop \
+  --scene retrieve_card_from_deck --port 8766 \
+  --pca-transform third_party/reactive_diffusion_policy/data/PCA_Transform_GelSight/pca_transform_matrix.npy \
+  --pca-mean third_party/reactive_diffusion_policy/data/PCA_Transform_GelSight/pca_mean_matrix.npy \
+  --marker-contract outputs/calibration/gelsight_marker_contract.json
+```
+
+Collection for a new marker-bearing multimodal episode uses the normal task
+command plus `TB_COLLECT_TACTILE_MARKERS=1`; it does not alter expert
+control, cameras, physics, or QA.  The already validated DP data and B1
+commands remain unchanged.
+
+Static/regression checks recommended:
+
+```bash
+python -m compileall -q packages/force-bench/src/force_bench/rdp
+pytest -q packages/force-bench/tests/test_rdp_official.py
+pytest -q packages/force-bench/tests/test_dp_official.py \
+  packages/force-bench/tests/test_a4_actions.py
+```
