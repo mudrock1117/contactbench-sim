@@ -149,14 +149,30 @@ can record the two 9x7 marker grids as
 
 The official PCA files are present and have the expected affine contract:
 normalized `[63*2]` offsets, `(x/width,y/height)`, then
-`(x - mean) @ W -> 15D`. However, upstream does not document that its real
-marker detector's IDs use the simulator's row-major ordering. Existing
-ContactBench episodes contain pressure grids, not marker displacement.
-Therefore newly collected metadata defaults
-`official_pca_compatible=false`, and the official dataset fails closed.
-A reviewed JSON contract setting this true is required only after a calibration
-sequence has established marker-ID correspondence. Pressure is never accepted
-as marker motion, and no random tactile feature is generated.
+`(x - mean) @ W -> 15D`. At 8ed82a3 the real detector declares a 7-row by
+9-column grid and flattens its tracker output row-major. ContactBench renders a
+9-row by 7-column grid because its tactile image axes are rotated. The public
+code contains no calibration establishing rotation direction and marker-ID
+correspondence between those two grids. A transpose inferred only from the
+shared count of 63 is therefore not accepted as certification.
+
+Two modes are supported:
+
+- `official`: the original upstream mean/basis and strict
+  `official_pca_compatible=true` gate; unchanged.
+- `simulation_fitted`: independently fits centered 15-D PCA per physical pad
+  from normalized ContactBench marker displacement in training episodes.
+  The immutable artifact records episode IDs, source array hashes, split,
+  fit scope, marker contract, normalization, NumPy version, code revision,
+  reconstruction metrics and checksums of both means/bases.
+
+A one-episode artifact must be explicitly marked
+`engineering_smoke_single_episode`. Formal artifacts accept training episodes
+only and must be fitted after the episode/seed split. Test episodes are never an
+input. Pressure is never accepted as marker motion and no random feature is
+generated. Training checkpoints store the PCA fingerprint; prediction and the
+inference server reject a changed artifact, and the simulator client sends the
+same fingerprint at every replan.
 
 ### Isolated environment
 
@@ -177,6 +193,20 @@ socket server is the boundary between PyTorch/cu117 and Warp/Newton.
 ```bash
 export TB_RDP_DATASET=outputs/datasets/card_multimodal_rdp
 export TB_RDP_UPSTREAM=third_party/reactive_diffusion_policy
+export TB_RDP_PCA_MODE=simulation_fitted
+export TB_RDP_PCA_ARTIFACT=outputs/rdp/pca/card_sim15
+
+# Current single successful trajectory: engineering smoke only.
+python -m force_bench.rdp.fit_pca "$TB_RDP_DATASET" \
+  --output "$TB_RDP_PCA_ARTIFACT" --split-name train \
+  --smoke-single-episode
+
+python -m force_bench.rdp.audit_data "$TB_RDP_DATASET" \
+  --pca-mode simulation_fitted --pca-artifact "$TB_RDP_PCA_ARTIFACT"
+
+# Formal runs use a train-only directory/list and omit --smoke-single-episode.
+# python -m force_bench.rdp.fit_pca outputs/datasets/card_rdp_train \
+#   --output outputs/rdp/pca/card_train_sim15 --split-name train
 
 # AT smoke, then paper-oriented training
 python -m force_bench.rdp.official_train --stage at \
@@ -204,9 +234,8 @@ In the simulation environment:
 ```bash
 TB_GELSIGHT=1 python -m force_bench.rdp.run_closed_loop \
   --scene retrieve_card_from_deck --port 8766 \
-  --pca-transform third_party/reactive_diffusion_policy/data/PCA_Transform_GelSight/pca_transform_matrix.npy \
-  --pca-mean third_party/reactive_diffusion_policy/data/PCA_Transform_GelSight/pca_mean_matrix.npy \
-  --marker-contract outputs/calibration/gelsight_marker_contract.json
+  --pca-mode simulation_fitted \
+  --pca-artifact outputs/rdp/pca/card_sim15
 ```
 
 Collection for a new marker-bearing multimodal episode uses the normal task
