@@ -50,6 +50,8 @@ class ContactBenchOfficialRDPDataset(BaseImageDataset):
         self.episodes = {}
         self.pca = {}
         self.pca_mode = str(pca_mode)
+        if self.pca_mode not in ("official", "simulation_fitted"):
+            raise ValueError("pca_mode must be official or simulation_fitted")
         shared_pca = (load_gelsight_pca(
             mode=self.pca_mode, artifact_path=pca_artifact_path)
             if self.pca_mode == "simulation_fitted" else None)
