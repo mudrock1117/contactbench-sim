@@ -1,0 +1,62 @@
+# Paper-oriented profile: undisclosed values retain official 8ed82a3 defaults.
+upstream_config: train_latent_diffusion_unet_real_image_workspace
+config:
+  task_name: contactbench_card_rdp_ldp
+  at_load_dir: ${oc.env:TB_RDP_AT_CHECKPOINT}
+  shape_meta: &shape_meta
+    obs:
+      wrist_rgb: {shape: [3, 240, 320], type: rgb}
+      agent_pos: {shape: [10], type: low_dim}
+      tactile_marker_pca: {shape: [30], type: low_dim}
+    extended_obs:
+      tactile_marker_pca: {shape: [30], type: low_dim}
+    action: {shape: [10]}
+  task:
+    name: contactbench_card_rdp_ldp
+    shape_meta: *shape_meta
+    dataset:
+      _target_: force_bench.rdp.official_dataset.ContactBenchOfficialRDPDataset
+      data_path: ${oc.env:TB_RDP_DATASET,outputs/datasets/card_multimodal}
+      pca_transform_path: ${oc.env:TB_RDP_UPSTREAM,third_party/reactive_diffusion_policy}/data/PCA_Transform_GelSight/pca_transform_matrix.npy
+      pca_mean_path: ${oc.env:TB_RDP_UPSTREAM,third_party/reactive_diffusion_policy}/data/PCA_Transform_GelSight/pca_mean_matrix.npy
+      observation_horizon: 2
+      horizon: 32
+      success_only: true
+      seed: 0
+      val_ratio: 0.0
+      at: ${policy.at}
+      use_latent_action_before_vq: false
+  policy:
+    shape_meta: *shape_meta
+    at:
+      load_dir: ${at_load_dir}
+    down_dims: [512, 1024, 2048]
+    num_inference_steps: 100
+  dataloader: {batch_size: 64, num_workers: 0, shuffle: true, pin_memory: true, persistent_workers: false}
+  val_dataloader: {batch_size: 64, num_workers: 0, shuffle: false, pin_memory: true, persistent_workers: false}
+  training:
+    device: cuda:0
+    seed: 42
+    debug: false
+    resume: true
+    lr_scheduler: cosine
+    lr_warmup_steps: 500
+    num_epochs: 401
+    gradient_accumulate_every: 1
+    use_ema: true
+    freeze_encoder: false
+    rollout_every: 50
+    checkpoint_every: 10
+    val_every: 1
+    sample_every: 10
+    max_train_steps: null
+    max_val_steps: null
+    tqdm_interval_sec: 1.0
+    layer_decay: 1.0
+    encoder_lr_coefficient: 0.1
+  logging: {project: contactbench-rdp-ldp, resume: false, mode: online, name: paper, tags: [paper], id: null, group: null}
+  checkpoint:
+    topk: {monitor_key: train_loss, mode: min, k: 1, format_str: "epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt"}
+    save_last_ckpt: true
+    save_last_snapshot: false
+  multi_run: {run_dir: outputs/rdp/ldp_paper}
