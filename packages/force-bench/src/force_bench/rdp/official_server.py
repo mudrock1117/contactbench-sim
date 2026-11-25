@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from force_bench.dp.transport import receive_arrays, send_arrays
 from .official_predict import _load
+from .tactile import pca_basis_fingerprint
 
 
 def main(argv=None):
@@ -21,11 +22,19 @@ def main(argv=None):
     obs_steps = int(ws.cfg.n_obs_steps)
     horizon = int(ws.cfg.horizon)
     ratio = int(ws.cfg.dataset_obs_temporal_downsample_ratio)
+    dataset_cfg = ws.cfg.task.dataset
+    pca_fingerprint = pca_basis_fingerprint(
+        mode=str(dataset_cfg.pca_mode),
+        transform_path=dataset_cfg.get("pca_transform_path"),
+        mean_path=dataset_cfg.get("pca_mean_path"),
+        artifact_path=dataset_cfg.get("pca_artifact_path"))
     print(json.dumps({
         "event": "ready",
         "implementation": "xiaoxiaoxh/reactive_diffusion_policy@8ed82a3",
         "slow_policy_hz": 12, "fast_action_hz": 24,
         "execute_actions_per_plan": 2,
+        "pca_mode": str(dataset_cfg.pca_mode),
+        "pca_fingerprint": pca_fingerprint,
     }), flush=True)
     with socket.socket() as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -43,6 +52,10 @@ def main(argv=None):
                     try:
                         mode = bytes(np.asarray(request["mode"], np.uint8)).decode()
                         if mode == "plan":
+                            request_fingerprint = bytes(np.asarray(
+                                request["pca_fingerprint"], np.uint8)).decode()
+                            if request_fingerprint != pca_fingerprint:
+                                raise ValueError("client PCA artifact differs from checkpoint config")
                             wrist = np.asarray(request["rgb_wrist"])
                             agent = np.asarray(request["agent_pos"])
                             tactile = np.asarray(request["tactile_marker_pca"])
