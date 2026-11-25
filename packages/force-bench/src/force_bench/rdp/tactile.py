@@ -126,6 +126,8 @@ class OfficialGelSightPCA:
                 f"got {self.mean.shape} and {self.W.shape}")
         self.mean = self.mean.reshape(expected).astype(np.float32)
         self.W = self.W.astype(np.float32)
+        self.fingerprint = pca_basis_fingerprint(
+            mode="official", transform_path=transform_path, mean_path=mean_path)
 
     @classmethod
     def from_upstream(cls, root: str | Path, *, marker_contract: dict):
@@ -151,6 +153,28 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def pca_basis_fingerprint(*, mode: str,
+                          transform_path: str | Path | None = None,
+                          mean_path: str | Path | None = None,
+                          artifact_path: str | Path | None = None) -> str:
+    """Fingerprint the exact PCA mode and numeric basis used at deployment."""
+    digest = hashlib.sha256()
+    digest.update(mode.encode())
+    if mode == "official":
+        if transform_path is None or mean_path is None:
+            raise ValueError("official PCA fingerprint requires both array paths")
+        digest.update(_sha256(Path(transform_path)).encode())
+        digest.update(_sha256(Path(mean_path)).encode())
+    elif mode == "simulation_fitted":
+        if artifact_path is None:
+            raise ValueError("simulation PCA fingerprint requires artifact path")
+        manifest = json.loads((Path(artifact_path) / "manifest.json").read_text())
+        digest.update(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
+    else:
+        raise ValueError("unknown PCA mode")
+    return digest.hexdigest()
+
+
 class SimulationFittedGelSightPCA:
     """Per-pad PCA fitted only from ContactBench training marker data."""
 
@@ -173,6 +197,8 @@ class SimulationFittedGelSightPCA:
                 "x": "divide_by_image_width_px",
                 "y": "divide_by_image_height_px"}:
             raise ValueError("simulation PCA normalization contract mismatch")
+        self.fingerprint = pca_basis_fingerprint(
+            mode="simulation_fitted", artifact_path=self.artifact_dir)
         self.means, self.W = [], []
         hashes = self.manifest.get("sha256", {})
         for side in ("left", "right"):
