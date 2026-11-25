@@ -11,7 +11,7 @@ from force_bench.dp.official_dataset import _pose_matrix
 from force_bench.dp.official_contract import validate_eef_episode_arrays
 from force_bench.robot.eef_action import encode_relative_eef, relative_eef_history
 from .official import activate_upstream
-from .tactile import OfficialGelSightPCA
+from .tactile import OfficialGelSightPCA, marker_window_indices
 from .timebase import RDPTimeConfig
 
 activate_upstream()
@@ -80,12 +80,10 @@ class ContactBenchOfficialRDPDataset(BaseImageDataset):
         anchor_s = float(item["policy_ticks"][anchor])
         query = self.time.fast_query_times(anchor_s)
         marker_times = np.asarray(ep["timestamps"][1:], dtype=np.float64)
-        indices = causal_indices(marker_times, query)
-        valid = np.asarray(ep["tactile_marker_valid"], dtype=bool)
-        if np.any(indices < 0) or np.any(indices >= len(valid)):
-            return False
+        indices = marker_window_indices(
+            marker_times, ep["tactile_marker_valid"], query)
         # A valid all-zero displacement is an important no-contact sample.
-        return bool(np.all(valid[indices]))
+        return indices is not None
 
     def __len__(self):
         return len(self.base)
@@ -124,13 +122,11 @@ class ContactBenchOfficialRDPDataset(BaseImageDataset):
             raise RuntimeError("causal wrist history has an unexpected length")
 
         marker_times = np.asarray(ep["timestamps"][1:], dtype=np.float64)
-        marker_idx = causal_indices(marker_times, query)
-        if np.any(marker_idx < 0):
-            raise IndexError("RDP marker window precedes the first causal tactile frame")
+        marker_idx = marker_window_indices(
+            marker_times, ep["tactile_marker_valid"], query)
+        if marker_idx is None:
+            raise RuntimeError("filtered RDP sample unexpectedly has an invalid marker frame")
         marker = np.asarray(ep["tactile_marker_displacement_px"])[marker_idx]
-        marker_valid = np.asarray(ep["tactile_marker_valid"])[marker_idx]
-        if not np.all(marker_valid):
-            raise ValueError("RDP window contains an invalid marker frame")
         emb = self.pca[eid].transform(
             marker, image_width_px=240, image_height_px=320)
         # Keep the two physical pads distinct: [left 15, right 15].
