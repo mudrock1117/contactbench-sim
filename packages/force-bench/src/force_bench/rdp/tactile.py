@@ -36,7 +36,7 @@ def marker_metadata(*, official_pca_compatible: bool = False) -> dict:
     }
 
 
-def frame_marker_displacement(frame) -> np.ndarray:
+def frame_marker_displacement(frame, *, writer=None) -> np.ndarray:
     """Return [63,2] (x right, y down) displacement in image pixels."""
     if not hasattr(frame, "shear_displacement_m") or not hasattr(frame, "normal_displacement_m"):
         raise TypeError("frame lacks physical GelSight displacement fields")
@@ -48,8 +48,8 @@ def frame_marker_displacement(frame) -> np.ndarray:
     from hydrogel.render import TactileTileWriter, marker_grid, raster_to_image
     rest_hw = np.asarray(marker_grid(), dtype=np.float32)
     height = raster_to_image(normal)
-    current_hw = np.asarray(
-        TactileTileWriter().marker_positions(height, shear), dtype=np.float32)
+    writer = writer or TactileTileWriter()
+    current_hw = np.asarray(writer.marker_positions(height, shear), dtype=np.float32)
     if rest_hw.shape != (MARKER_COUNT, 2) or current_hw.shape != rest_hw.shape:
         raise ValueError("Hydrogel marker model is not the required 9x7 grid")
     delta_hw = current_hw - rest_hw
@@ -59,11 +59,16 @@ def frame_marker_displacement(frame) -> np.ndarray:
 
 def read_rig_markers(rig) -> tuple[np.ndarray, np.ndarray]:
     values = np.zeros((2, MARKER_COUNT, 2), dtype=np.float32)
+    writer = getattr(rig, "_rdp_marker_writer", None)
+    if writer is None:
+        from hydrogel.render import TactileTileWriter
+        writer = TactileTileWriter()
+        rig._rdp_marker_writer = writer
     valid = np.zeros(2, dtype=bool)
     for index, pad in enumerate(PAD_ORDER):
         frames = getattr(rig, "tactile_frames", {}).get(pad, ())
         if frames:
-            values[index] = frame_marker_displacement(frames[-1])
+            values[index] = frame_marker_displacement(frames[-1], writer=writer)
             valid[index] = bool(np.isfinite(values[index]).all())
     return values, valid
 
