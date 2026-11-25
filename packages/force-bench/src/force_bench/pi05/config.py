@@ -52,17 +52,23 @@ class ContactBenchDataFactory:
 
 def make_config(profile, *, exp_name, data_path=DEFAULT_DATA,
                 model_root=DEFAULT_MODEL_ROOT, resume=False, overwrite=False):
-    if profile not in ("smoke", "paper"):
-        raise ValueError("profile must be smoke or paper")
+    if profile not in ("smoke", "smoke_no_ema", "smoke_lora", "paper"):
+        raise ValueError(
+            "profile must be smoke, smoke_no_ema, smoke_lora, or paper")
     root = Path(model_root)
-    smoke = profile == "smoke"
+    smoke_like = profile != "paper"
+    lora = profile == "smoke_lora"
+    no_ema = profile in ("smoke_no_ema", "smoke_lora")
+    model_config = pi0_config.Pi0Config(
+        pi05=True, action_dim=MODEL_ACTION_DIM,
+        action_horizon=ACTION_HORIZON,
+        paligemma_variant="gemma_2b_lora" if lora else "gemma_2b",
+        action_expert_variant="gemma_300m_lora" if lora else "gemma_300m")
     return openpi_config.TrainConfig(
         name=f"contactbench_pi05_{profile}",
         project_name="contactbench-pi05",
         exp_name=str(exp_name),
-        model=pi0_config.Pi0Config(
-            pi05=True, action_dim=MODEL_ACTION_DIM,
-            action_horizon=ACTION_HORIZON),
+        model=model_config,
         weight_loader=weight_loaders.CheckpointWeightLoader(
             str(root / "pretrained" / "pi05_base" / "params")),
         data=ContactBenchDataFactory(
@@ -70,22 +76,23 @@ def make_config(profile, *, exp_name, data_path=DEFAULT_DATA,
         assets_base_dir=str(root / "assets"),
         checkpoint_base_dir=str(root / "checkpoints"),
         seed=0,
-        batch_size=1 if smoke else 64,
-        num_workers=0 if smoke else 4,
-        num_train_steps=10 if smoke else 20_000,
-        log_interval=1 if smoke else 100,
-        save_interval=10 if smoke else 1_000,
-        keep_period=None if smoke else 5_000,
+        batch_size=1 if smoke_like else 64,
+        num_workers=0 if smoke_like else 4,
+        num_train_steps=10 if smoke_like else 20_000,
+        log_interval=1 if smoke_like else 100,
+        save_interval=10 if smoke_like else 1_000,
+        keep_period=None if smoke_like else 5_000,
         overwrite=bool(overwrite),
         resume=bool(resume),
-        wandb_enabled=False if smoke else True,
+        wandb_enabled=not smoke_like,
         lr_schedule=optimizer.CosineDecaySchedule(
-            warmup_steps=1 if smoke else 500,
+            warmup_steps=1 if smoke_like else 500,
             peak_lr=5e-5,
-            decay_steps=10 if smoke else 20_000,
+            decay_steps=10 if smoke_like else 20_000,
             decay_lr=5e-6),
         optimizer=optimizer.AdamW(clip_gradient_norm=1.0),
-        ema_decay=0.999,
+        freeze_filter=model_config.get_freeze_filter(),
+        ema_decay=None if no_ema else 0.999,
         fsdp_devices=1,
         policy_metadata={
             "task": "retrieve_card_from_deck",
