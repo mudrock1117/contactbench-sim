@@ -204,9 +204,10 @@ python -m force_bench.rdp.fit_pca "$TB_RDP_DATASET" \
 python -m force_bench.rdp.audit_data "$TB_RDP_DATASET" \
   --pca-mode simulation_fitted --pca-artifact "$TB_RDP_PCA_ARTIFACT"
 
-# Formal runs use a train-only directory/list and omit --smoke-single-episode.
-# python -m force_bench.rdp.fit_pca outputs/datasets/card_rdp_train \
-#   --output outputs/rdp/pca/card_train_sim15 --split-name train
+# Formal runs require an explicit newline-delimited train episode list.
+# python -m force_bench.rdp.fit_pca outputs/datasets/card_rdp_all \
+#   --output outputs/rdp/pca/card_train_sim15 --split-name train \
+#   --train-episode-list configs/card_rdp_train_episode_ids.txt
 
 # AT smoke, then paper-oriented training
 python -m force_bench.rdp.official_train --stage at \
