@@ -49,6 +49,8 @@ def main(argv=None):
             "official_pca_compatible": bool(
                 contract.get("official_pca_compatible", False)),
             "pca_ready": bool(pca_ready),
+            "pca_fingerprint": (getattr(pca, "fingerprint", None)
+                                if pca_ready else None),
             "pca_error": pca_error,
             "pressure_not_used_as_marker": True,
         }
