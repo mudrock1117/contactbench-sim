@@ -81,8 +81,10 @@ def main(argv=None):
             agent = np.asarray(observation["eef_relative_history"], np.float32)[::-2][::-1]
             tactile = np.stack(marker_history[::-2][::-1]).astype(np.float32)
             _response(conn, {
-                "mode": _mode("plan"), "rgb_wrist": wrist,
-                "agent_pos": agent, "tactile_marker_pca": tactile})
+                "mode": _mode("plan"),
+                "pca_fingerprint": _mode(pca.fingerprint),
+                "rgb_wrist": wrist, "agent_pos": agent,
+                "tactile_marker_pca": tactile})
             replans += 1
             extended = list(marker_history)
             for fast_index in range(timing.execution_horizon):
