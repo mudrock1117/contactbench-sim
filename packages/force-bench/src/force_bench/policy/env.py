@@ -226,6 +226,35 @@ class ClosedLoopPolicyEnv:
         while self._tactile_next / self.config.tactile_hz <= self.t + 1e-12:
             self._tactile_next += 1
 
+    def warmup_sensors(self, readiness, *, max_physics_frames=120):
+        """Advance sensors without issuing policy or expert actions.
+
+        Warmup owns no policy ticks: it does not consume the frame scheduler,
+        increment the policy step count, or alter the action chunk. The
+        returned history is anchored to one real physics state after all
+        requested sensors report readiness.
+        """
+        if self.rig is None or self.done:
+            raise RuntimeError("reset is required before sensor warmup")
+        if self.steps != 0:
+            raise RuntimeError("sensor warmup is only valid before policy steps")
+        if max_physics_frames < 1:
+            raise ValueError("max_physics_frames must be positive")
+        for frame_count in range(1, int(max_physics_frames) + 1):
+            self._physics_frame()
+            for camera in self.rgb_cameras.values():
+                camera.sample(self.rig.s0, self.t)
+            if self.config.include_tactile:
+                self._sample_tactile()
+            observation = self.observe()
+            if readiness(self.rig, observation):
+                # Left-pad with this single synchronized, causal state. No
+                # pre-reset or intermediate warmup state enters policy history.
+                self._history = [observation]
+                return self._with_history(observation), frame_count
+        raise TimeoutError(
+            f"sensors were not ready after {int(max_physics_frames)} physics frames")
+
     def _physics_frame(self):
         frame_dt = 1.0 / float(self.rig.fps)
         sim_dt = frame_dt / self.rig.substeps
