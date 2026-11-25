@@ -22,8 +22,8 @@ expert target, measured width and commanded width. Old episodes missing these
 fields are rejected for 10D; state differences are never substituted for commands.
 Recorded action_target_velocity and action_feedforward remain part of the equivalence audit.
 
-At 12 Hz an action spans five 60 Hz frames. At 24 Hz the causal online schedule
-alternates 3 and 2 frames. Offline selection uses timestamps. Official horizon is
+At 12 Hz an action spans five 60 Hz frames. At 24 Hz the causal online schedule uses cumulative floor edges and
+alternates 2 and 3 frames. Offline selection uses timestamps. Official horizon is
 16, observation history 2 and execution horizon 8. Upstream predict_action starts
 at n_obs_steps-1 (index 1), so the dataset places the causal previous command at
 index 0 and current command at index 1. Images are causal only.
@@ -219,6 +219,6 @@ Static/regression checks recommended:
 ```bash
 python -m compileall -q packages/force-bench/src/force_bench/rdp
 pytest -q packages/force-bench/tests/test_rdp_official.py
-pytest -q packages/force-bench/tests/test_dp_official.py \
-  packages/force-bench/tests/test_a4_actions.py
+pytest -q packages/force-bench/tests/test_a4_official_dp.py \
+  packages/force-bench/tests/test_policy_interfaces.py
 ```
