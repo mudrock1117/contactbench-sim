@@ -218,6 +218,8 @@ class RigCollector:
         self.has_eef_fk = callable(
             getattr(getattr(rig, "ik", None), "tcp_pose_for_joint_q", None))
         self.has_tactile = bool(getattr(rig, "gel_sensors", {}))
+        self.collect_tactile_markers = (
+            self.has_tactile and os.environ.get("TB_COLLECT_TACTILE_MARKERS", "0") == "1")
         self.tactile_size = int(tactile_size)
         if self.tactile_size < 1:
             raise ValueError("tactile_size must be positive")
@@ -252,6 +254,12 @@ class RigCollector:
         metadata["language_semantics"] = "task-only instruction; contains no state, phase, or outcome"
         if self.has_tactile:
             metadata["tactile"] = tactile_metadata(self.tactile_size)
+            if self.collect_tactile_markers:
+                from force_bench.rdp.tactile import marker_metadata
+                metadata["tactile_markers"] = marker_metadata(
+                    official_pca_compatible=False)
+                metadata["tactile_markers"]["alignment"] = (
+                    "one entry per action, sampled after its physics step")
             initial, validity = read_tactile(rig, self.tactile_size)
         else:
             initial, validity = None, None
@@ -308,6 +316,11 @@ class RigCollector:
         tactile, valid = read_tactile(self.rig, self.tactile_size) if self.has_tactile else (None, None)
         action, extra_cmd = self.pending
         extra = {**extra_cmd, **{k: np.asarray(v, dtype=np.float32) for k, v in (extra or {}).items()}}
+        if self.collect_tactile_markers:
+            from force_bench.rdp.tactile import read_rig_markers
+            marker_displacement, marker_valid = read_rig_markers(self.rig)
+            extra["tactile_marker_displacement_px"] = marker_displacement
+            extra["tactile_marker_valid"] = marker_valid
         for capture in self.rgb.values():
             capture.capture(self.rig.s0, timestamp)
         self.writer.append(action, self.observation.sample(), timestamp=timestamp, tactile=tactile,
