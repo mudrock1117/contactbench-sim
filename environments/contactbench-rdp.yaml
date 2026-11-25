@@ -1,0 +1,28 @@
+# Isolated official RDP training environment (Ubuntu 22.04).
+# Install torch separately from the cu117 index as documented upstream.
+name: contactbench-rdp
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - numpy==1.26.4
+      - scipy
+      - hydra-core
+      - omegaconf
+      - einops
+      - tqdm
+      - dill
+      - zarr
+      - numcodecs
+      - h5py
+      - wandb
+      - threadpoolctl
+      - imageio
+      - imageio-ffmpeg
+      - diffusers
+      - accelerate
+      - scikit-learn
+      - opencv-python-headless
+      - pytest
