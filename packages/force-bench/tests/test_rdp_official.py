@@ -466,3 +466,35 @@ def test_rdp_warmup_waits_for_timestamp_aligned_rgb(monkeypatch):
     assert warmup == 5
     assert observation["timestamp"] == observation["rgb_timestamp"]
     np.testing.assert_array_equal(observation["proprio"], np.full(18, 5))
+
+
+def test_policy_sensor_warmup_does_not_consume_formal_steps():
+    from types import SimpleNamespace
+    from force_bench.policy.env import ClosedLoopPolicyEnv
+
+    fake = SimpleNamespace(
+        rig=SimpleNamespace(), done=False, steps=0, t=0.0,
+        rgb_cameras={}, config=SimpleNamespace(include_tactile=False),
+        _history=[])
+    fake._physics_frames = 0
+
+    def physics_frame():
+        fake._physics_frames += 1
+        fake.t = fake._physics_frames / 60.0
+
+    fake._physics_frame = physics_frame
+    fake.observe = lambda: {
+        "timestamp": np.float64(fake.t),
+        "rgb_timestamp": np.float64(fake.t),
+        "rgb_valid": True,
+        "proprio": np.zeros(18, np.float32),
+    }
+    fake._with_history = lambda observation: {
+        **observation, "history": [observation]}
+    observation, frames = ClosedLoopPolicyEnv.warmup_sensors(
+        fake, lambda rig, obs: fake._physics_frames == 3,
+        max_physics_frames=5)
+    assert frames == 3
+    assert fake._physics_frames == 3
+    assert fake.steps == 0
+    assert observation["timestamp"] == pytest.approx(3 / 60)
