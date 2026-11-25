@@ -252,3 +252,151 @@ pytest -q packages/force-bench/tests/test_rdp_official.py
 pytest -q packages/force-bench/tests/test_a4_official_dp.py \
   packages/force-bench/tests/test_policy_interfaces.py
 ```
+
+
+## B3 — official OpenPI pi0.5
+
+B3 is pinned to Physical-Intelligence/openpi at
+`15a9616a00943ada6c20a0f158e3adb39df2ccac`. That revision contains both
+the primary Flax/JAX trainer (`scripts/train.py`) and an official PyTorch
+trainer. ContactBench uses the JAX path because the published
+`pi05_base/params` checkpoint is an Orbax/JAX parameter tree. The upstream
+model, flow-matching loss, tokenizer, transforms, optimizer, EMA and checkpoint
+implementation are not copied or modified.
+
+The model remains the official 32-dimensional pi0.5 architecture. ContactBench
+provides a physical 10D state/action, applies the upstream
+`PadStatesAndActions(32)`, and removes padding with an output transform.
+No `DeltaActions` transform is applied: each 32-step target chunk is already
+encoded relative to the single measured TCP anchor at its planning timestamp.
+The 10D order is translation in metres, rotation 6D (first two rotation-matrix
+columns), and absolute total gripper width in metres.
+
+Only the wrist camera is real. It is provided as `left_wrist_0_rgb`; the base
+and right-wrist placeholders are zero images with masks set false. Original
+240x320 RGB is resized with aspect-ratio-preserving zero padding by the official
+`ResizeImages(224,224)` transform. State is the current TCP relative to itself
+(identity rotation and zero translation) plus measured gripper width. The prompt
+is `pick up the thin object on the table`. Images are selected causally at
+12 Hz and may repeat for two 24 Hz actions; timestamp and age remain auditable.
+
+### Locked environment and storage
+
+```bash
+cd /path/to/contactbench-sim
+git pull --ff-only
+git -C third_party/openpi rev-parse HEAD
+# Must print 15a9616a00943ada6c20a0f158e3adb39df2ccac
+
+cd third_party/openpi
+uv sync --locked
+cd ../..
+uv pip install --python third_party/openpi/.venv/bin/python \
+  -e packages/force-bench --no-deps
+
+mkdir -p /home/zdh/contactbench_models/pi05/{pretrained,checkpoints,assets,logs,cache}
+```
+
+The locked environment is Python 3.11, JAX 0.5.3 with CUDA 12, Flax 0.10.2,
+Orbax 0.11.13, and PyTorch 2.7.1. It is independent of the Python 3.12
+simulation environment.
+
+### Pretrained checkpoint
+
+```bash
+gcloud storage cp --recursive \
+  gs://openpi-assets/checkpoints/pi05_base \
+  /home/zdh/contactbench_models/pi05/pretrained/
+test -d /home/zdh/contactbench_models/pi05/pretrained/pi05_base/params
+```
+
+This is the upstream checkpoint URI used by the locked config itself. Do not
+start fine-tuning if `params` is absent; random initialization is not an
+accepted fallback.
+
+### Data audit and train-only normalization
+
+```bash
+OPENPI_PY=third_party/openpi/.venv/bin/python
+$OPENPI_PY -m force_bench.pi05.audit_data \
+  --data outputs/datasets/card_multimodal_a4
+
+$OPENPI_PY -m force_bench.pi05.compute_norm_stats \
+  --data outputs/datasets/card_multimodal_a4 \
+  --output /home/zdh/contactbench_models/pi05/assets
+```
+
+The current single episode is an engineering smoke set only. Formal statistics
+must be recomputed after an episode/seed split using training episodes only.
+
+### Training
+
+Smoke (batch 1, ten updates, BF16, full fine-tuning):
+
+```bash
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.90 \
+JAX_COMPILATION_CACHE_DIR=/home/zdh/contactbench_models/pi05/cache/jax \
+WANDB_DIR=/home/zdh/contactbench_models/pi05/logs \
+third_party/openpi/.venv/bin/python -m force_bench.pi05.official_train \
+  --profile smoke --exp-name card_smoke \
+  --data outputs/datasets/card_multimodal_a4 \
+  --model-root /home/zdh/contactbench_models/pi05 \
+  --overwrite
+```
+
+Formal profile uses full fine-tuning, batch 64, 20,000 updates, LR 5e-5,
+500-step warmup and cosine decay to 5e-6:
+
+```bash
+third_party/openpi/.venv/bin/python -m force_bench.pi05.official_train \
+  --profile paper --exp-name card_full \
+  --data outputs/datasets/card_multimodal_a4 \
+  --model-root /home/zdh/contactbench_models/pi05
+```
+
+A 48GB 4090 is not guaranteed to fit official full fine-tuning. The locked JAX
+trainer has no gradient-accumulation option and single-device FSDP cannot reduce
+memory. If batch 1 OOMs, the honest alternatives are multi-GPU full fine-tuning
+or a separately labelled LoRA/frozen-parameter protocol; neither is equivalent
+to the requested full fine-tuning result. The locked PyTorch trainer enables
+gradient checkpointing, but using it requires an officially converted
+safetensors base checkpoint and is a distinct backend protocol.
+
+### Prediction and closed loop
+
+The smoke final checkpoint is normally step 9:
+
+```bash
+PI05_CKPT=/home/zdh/contactbench_models/pi05/checkpoints/contactbench_pi05_smoke/card_smoke/9
+
+third_party/openpi/.venv/bin/python -m force_bench.pi05.official_predict \
+  --profile smoke --checkpoint "$PI05_CKPT" \
+  --data outputs/datasets/card_multimodal_a4 \
+  --model-root /home/zdh/contactbench_models/pi05
+
+third_party/openpi/.venv/bin/python -m force_bench.pi05.official_server \
+  --profile smoke --checkpoint "$PI05_CKPT" \
+  --data outputs/datasets/card_multimodal_a4 \
+  --model-root /home/zdh/contactbench_models/pi05 \
+  --host 127.0.0.1 --port 8767
+```
+
+In the separate simulation environment:
+
+```bash
+conda activate contactbench
+python -m force_bench.pi05.run_closed_loop \
+  --scene retrieve_card_from_deck --host 127.0.0.1 --port 8767 \
+  --execution-horizon 8 --max-fast-steps 24
+```
+
+The socket carries only wrist RGB and the 10D state. GelSight may remain part of
+scene physics but is not a model input. Each replan installs one measured TCP
+anchor and executes a configurable prefix of the returned 32x10 chunk.
+
+Static checks:
+
+```bash
+python -m compileall -q packages/force-bench/src/force_bench/pi05
+pytest -q packages/force-bench/tests/test_pi05_official.py
+```
