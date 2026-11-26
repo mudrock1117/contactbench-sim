@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import numpy as np
+
+from .data import TIMESTAMP_ATOL
 
 REQUIRED = (
     "timestamps",
@@ -29,6 +32,22 @@ NATIVE_TACTILE_SHAPE = (2, 320, 240, 3)
 
 def _array(data, key):
     return np.asarray(data[key][:])
+
+
+def validate_source_age(ts, source, name, sensor_hz, physics_hz=60.0):
+    """Bound causal age by the maximum quantized sensor period."""
+    limit = math.ceil(physics_hz / sensor_hz) / physics_hz
+    if source.shape != ts.shape or not np.isfinite(source).all():
+        raise ValueError(f"{name}: causal source timestamps must be finite [T]")
+    age = ts - source
+    bad = np.flatnonzero((age < -TIMESTAMP_ATOL) | (age > limit + TIMESTAMP_ATOL))
+    if len(bad):
+        i = int(bad[0])
+        raise ValueError(
+            f"{name}: source timestamp is future-dated or exceeds its sampling-age bound; "
+            f"row={i}, policy={ts[i]:.12f}, source={source[i]:.12f}, "
+            f"age={age[i]:.12f}s, limit={limit:.12f}s"
+        )
 
 
 def audit(path):
@@ -78,12 +97,10 @@ def audit(path):
         _array(data, "contactbench_wrist_rgb_timestamps").astype(np.float64),
         _array(data, "contactbench_tactile_rgb_timestamps").astype(np.float64),
     ]
-    max_age = (1.0 / 60.0 + 1e-6, 1.0 / 12.0 + 1e-6, 1.0 / POLICY_HZ + 1e-6)
-    for source, age in zip(source_times, max_age):
-        if source.shape != ts.shape or not np.isfinite(source).all():
-            raise ValueError("causal source timestamps must be finite [T]")
-        if np.any(source > ts + 1e-9) or np.any(ts - source > age):
-            raise ValueError("source timestamp is future-dated or exceeds its sampling-age bound")
+    for source, name, hz in zip(
+        source_times, ("observation", "wrist_rgb", "tactile_rgb"), (60.0, 12.0, POLICY_HZ)
+    ):
+        validate_source_age(ts, source, name, hz)
 
     changed_sensors = [False, False]
     start = 0
