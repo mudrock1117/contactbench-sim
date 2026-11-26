@@ -16,8 +16,8 @@ def main():
     root = zarr.open_group(a.data, mode="r")
     d = root["data"]
     i = a.index
-    ends = np.asarray(root["meta/episode_ends"])
-    if i < 0 or i + 32 >= len(d["right_wrist_pose"]) or not np.any((ends > i) & (ends > i + 32)):
+    ends = np.asarray(root["meta/episode_ends"][:])
+    if i < 0 or i + 32 >= d["right_wrist_pose"].shape[0] or not np.any((ends > i) & (ends > i + 32)):
         raise ValueError("invalid window")
     if i + 32 >= ends[np.searchsorted(ends, i, side="right")]:
         raise ValueError("window crosses episode")
