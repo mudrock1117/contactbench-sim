@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 POLICY_HZ = 24.0
+TIMESTAMP_ATOL = 1e-9
 NATIVE_TACTILE_SHAPE = (320, 240, 3)
 TAXIM_RENDERER = "hydrogel.render.TaximRenderer.render"
 PROMPT = "pick up the thin object on the table."
@@ -22,10 +23,11 @@ def causal_indices(source_timestamps, target_timestamps):
         raise ValueError("timestamps must be finite")
     if len(source) > 1 and np.any(np.diff(source) <= 0):
         raise ValueError("source timestamps must increase strictly")
-    indices = np.searchsorted(source, target, side="right") - 1
+    # Treat only numerical roundoff as equality, never a physical future step.
+    indices = np.searchsorted(source, target + TIMESTAMP_ATOL, side="right") - 1
     if np.any(indices < 0):
         raise ValueError("no causal sample exists at or before a requested time")
-    if np.any(source[indices] > target + 1e-12):
+    if np.any(source[indices] > target + TIMESTAMP_ATOL):
         raise AssertionError("future observation leakage")
     return indices.astype(np.int64)
 
