@@ -469,3 +469,109 @@ python -m force_bench.pi05.run_closed_loop \
   --scene retrieve_card_from_deck --host 127.0.0.1 --port 8767 \
   --execution-horizon 8 --max-fast-steps 24
 ```
+
+
+## B4.2 — FTP-1 simulation tactile adapter
+
+FTP-1 remains pinned at `89fa681d6c014cce28300946b7526db808e0b1c1`.
+Collection is opt-in and independent of the DP/RDP/pi0.5 RGB/marker controls:
+
+```bash
+TB_COLLECT_DIR=outputs/datasets/card_ftp1_raw \
+TB_COLLECT_TASK=retrieve_card_from_deck \
+TB_COLLECT_RGB=1 TB_COLLECT_RGB_MODE=wrist TB_COLLECT_RGB_FPS=12 \
+TB_COLLECT_TACTILE_RGB=1 TB_COLLECT_TACTILE_RGB_FPS=24 \
+python -m force_bench.appendix_tasks.retrieve_card_from_deck
+```
+
+Physics remains 60 Hz and the expert/task configuration is unchanged. Existing `Rig.run`
+calls `RigCollector.after_step` after each completed physics frame. The new capture
+samples both current Hydrogel pads at post-step timestamps on a 24 Hz due schedule.
+No initial image is fabricated: first policy row starts at the first real tactile frame.
+Wrist RGB remains the existing wrist camera stream at 12 Hz. Conversion selects only
+latest images/state timestamps `<=` each 24 Hz policy timestamp; timestamps and ages
+are audit data, so repeated wrist frames are expected and future observation leakage is
+rejected.
+
+The optical path is the actual CPU renderer:
+`HydroelasticGelSight.sample(...).normal_displacement_m` →
+`hydrogel.render.raster_to_image` → `TaximRenderer.render`. `TaximRenderer` loads the
+vendored GelSight Mini `polycalib.npz` and `bg.png`, returning native uint8 RGB
+`(240,320,3)`. No pressure visualization, marker overlay, or placeholder image is
+used. It opens no window and is intended to work headlessly; runtime/headless behavior
+has **not** been executed in this code-only change. FTP-1's pinned Zarr loader resizes
+image tactile data with OpenCV `cv2.resize(...,(224,224))`; wrapper inference uses the
+pinned OpenPI `resize_with_pad(...,224,224)` for wrist RGB and the wrapper's domain,
+then shared, state/tactile normalization. Sensor input metadata is
+`right_tactile_gripper`, `GelSightMini`, function areas `[0,1]`, ordered
+`gel_left, gel_right`.
+
+### Official Zarr mapping and A4 action boundary
+
+| FTP-1 Zarr key | ContactBench source / semantics |
+| --- | --- |
+| `timestamps` | causal 24 Hz policy grid in simulation seconds |
+| `right_wrist_camera_rgb` | existing wrist RGB stream; causal hold-last |
+| `right_wrist_pose` | measured command-start TCP world pose, xyz + rotvec |
+| `right_hand_joints` / `right_hand_joints_idx` | measured absolute width (m), index 28 |
+| `right_tactile_data_gripper` | Taxim uint8 RGB, [time, gel_left/gel_right, 240,320,3] |
+| `right_tactile_area_gripper` | repeated [0,1] |
+| `right_tactile_sensor_gripper` | `GelSightMini` |
+| `right_tactile_type_gripper` | `image` |
+| `sub_task_instruction` | exact `pick up the thin object on the table.` |
+
+The official loader builds the default 120D UAS; only the right wrist pose 9D and
+canonical hand slot 28 (flat action index 44) are valid, i.e. 10 active dimensions.
+It derives pose targets from the world-frame `right_wrist_pose` trajectory and applies
+`action_pose_rep=relative` once against the current anchor. Configure
+`action_joint_rep=mix` so hand slot 28 remains absolute. `decode_action_chunk` extracts
+the first 9 pose values and flat index 44; do not convert pose to relative twice.
+The pinned loader has no dedicated A4 command-target Zarr key: exact recorded command
+targets are retained in `contactbench_a4_action_*` provenance arrays and are not
+silently substituted for observations or consumed by the official loader. This means
+official pose supervision follows future recorded TCP states; command-target vs
+subsequent measured-state equivalence remains an explicit audit item.
+
+### Convert, audit, preview, normalize, and test
+
+Run in the already prepared FTP-1 environment after setting the locked upstream path:
+
+```bash
+export PYTHONPATH="$PWD/packages/force-bench/src:$PWD/third_party/ftp1-policy/src"
+python -m force_bench.ftp1.convert --data outputs/datasets/card_ftp1_raw \
+  --output outputs/datasets/ftp1/contactbench_retrieve_card.zarr
+python -m force_bench.ftp1.audit_data --data outputs/datasets/ftp1/contactbench_retrieve_card.zarr
+python -m force_bench.ftp1.preview_tactile \
+  --episode "$(find outputs/datasets/card_ftp1_raw -name metadata.json -print -quit | xargs dirname)" \
+  --index 0 --output outputs/datasets/ftp1/tactile_preview.png
+
+# Official upstream normalization launcher; train split only for formal datasets.
+export FTP1_REPO_ID=contactbench_retrieve_card
+export FTP1_CONFIG=packages/force-bench/config/ftp1/dataset_contactbench.json
+export FTP1_CACHE="$HOME/contactbench_models/ftp1"
+# Set these variables in the copied upstream launcher before execution:
+# repo_id=$FTP1_REPO_ID; dataset_config_path=$FTP1_CONFIG;
+# checkpoint_base_dir=$FTP1_CACHE/checkpoints; assets_base_dir=$FTP1_CACHE/assets;
+# norm_sample_ratio=1.0; val_ratio=0.2
+bash third_party/ftp1-policy/scripts_exp_zarr/univtac/compute_norm_stats_univtac_example.sh
+
+# User-authorized later, not executed during this change:
+python -m pytest packages/force-bench/tests/test_ftp1_adapter.py
+```
+
+The current collection has only engineering-smoke status until complete successful
+episodes exist. The script above is a recipe, not a claim that collection, conversion,
+auditing, normalization, pytest, inference, or optical rendering has been run. For
+formal statistics split whole episodes/seeds first and fit normalization on training
+episodes only.
+
+### Offline and online preprocessing
+
+`force_bench.ftp1.preprocess.prepare_observation` resizes wrist RGB with official
+OpenPI `resize_with_pad`, tactile RGB using the same OpenCV 224x224 resize as the
+pinned Zarr loader, packs the current-anchor identity pose and absolute gripper width
+into the official 120D state, and passes raw tactile plus the fixed sensor/area IDs
+to `FTP1InferenceWrapper`; the wrapper applies its official image/state/tactile
+normalization and GelSightMini tokenizer. These pure adapter tests are added but were
+not run. No model architecture, expert controller, task success logic, or physics
+parameters were changed.
