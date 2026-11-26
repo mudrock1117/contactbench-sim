@@ -1,6 +1,8 @@
 """Causal ContactBench episode conversion helpers for the official FTP-1 Zarr loader."""
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -28,7 +30,7 @@ def causal_indices(source_timestamps, target_timestamps):
     return indices.astype(np.int64)
 
 
-def _read_rgb_stream(root, relative, *, image_shape=None):
+def _read_rgb_stream(root, relative, *, image_shape=None, verify_manifest=False):
     import imageio.v2 as iio
     directory = Path(root) / relative
     times = np.load(directory / "timestamps.npy", allow_pickle=False)
@@ -38,6 +40,22 @@ def _read_rgb_stream(root, relative, *, image_shape=None):
             or (len(times) > 1 and np.any(np.diff(times) <= 0))
             or [p.name for p in files] != expected_names):
         raise ValueError(f"incomplete or unordered RGB stream: {directory}")
+    if verify_manifest:
+        manifest_path = directory / "manifest.json"
+        if not manifest_path.is_file():
+            raise ValueError(f"missing RGB integrity manifest: {manifest_path}")
+        manifest = json.loads(manifest_path.read_text())
+        expected_paths = {"timestamps.npy", *(f"images/{name}" for name in expected_names)}
+        hashes = manifest.get("files_sha256", {})
+        if not expected_paths.issubset(hashes):
+            raise ValueError(f"RGB manifest is incomplete: {manifest_path}")
+        for relative_path, expected_hash in hashes.items():
+            file_path = directory / relative_path
+            if not file_path.is_file():
+                raise ValueError(f"manifest file is missing: {file_path}")
+            actual_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
+            if actual_hash != expected_hash:
+                raise ValueError(f"RGB manifest hash mismatch: {file_path}")
     images = []
     for path in files:
         image = np.asarray(iio.imread(path))
@@ -88,7 +106,7 @@ def episode_to_ftp1(episode_path):
     tactile = []
     tactile_times = None
     for pad in PAD_ORDER:
-        ts, images = _read_rgb_stream(root, f"rgb/tactile/{pad}", image_shape=NATIVE_TACTILE_SHAPE)
+        ts, images = _read_rgb_stream(root, f"rgb/tactile/{pad}", image_shape=NATIVE_TACTILE_SHAPE, verify_manifest=True)
         if tactile_times is None:
             tactile_times = ts
         elif not np.array_equal(ts, tactile_times):
@@ -97,7 +115,7 @@ def episode_to_ftp1(episode_path):
     if len(tactile_times) < 2 or not any(
             np.any(frame != images[0]) for images in tactile for frame in images[1:]):
         raise ValueError("optical tactile RGB is static; refusing conversion")
-    wrist_times, wrist_images = _read_rgb_stream(root, "rgb/wrist")
+    wrist_times, wrist_images = _read_rgb_stream(root, "rgb/wrist", verify_manifest=True)
     if (tactile_times[0] < timestamps[0] - 1e-9 or tactile_times[-1] > timestamps[-1] + 1e-9
             or wrist_times[0] < timestamps[0] - 1e-9 or wrist_times[-1] > timestamps[-1] + 1e-9):
         raise ValueError("RGB timestamps fall outside episode timestamp bounds")
