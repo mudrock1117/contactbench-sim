@@ -691,7 +691,15 @@ def build_scene(rig, mode: str) -> dict:
     tip = subdiv(crop_box(key_raw, (KEY_TIP_CROP_X, None, None), (None, None, None)), 0.0006)
     bend = subdiv(crop_box(key_raw, (None, None, None), (KEY_BOX_X0, None, None)), 0.0012)
     T_K0 = key_flat_pose(KEY_YAW0, KEY_PINCH_XY)
-    T_B0 = T_K0 @ Tm(np.eye(3), c_K)
+    in_hand = os.environ.get("AK_START_IN_HAND", "0") == "1"
+    G_start = G_NOM.copy()
+    T_initial = T_K0.copy()
+    if in_hand:
+        G_start[1, 3] -= 6.0 * MM
+        q_init = q_unengaged() if mode == "tighten" else np.radians(LOOSEN_Q0_DEG)
+        psi_init = np.radians(congruent_psi(q_init, np.degrees(PSI_START[mode])))
+        T_initial = key_drive_pose(psi_init, Z0 + HEAD_TOP_Z - LEAD * q_init + HOVER_DZ + 20 * MM)
+    T_B0 = T_initial @ Tm(np.eye(3), c_K)
     key_body = b.add_body(xform=wp.transform(wp.vec3(*T_B0[:3, 3]),
                                              wp.quat(*HP.quat_of_R(T_B0[:3, :3]).tolist())),
                           label="allen_key")
@@ -723,7 +731,8 @@ def build_scene(rig, mode: str) -> dict:
     HP.filter_arm_links(rig, "allen_key")
     HP.filter_statics_and_ground(rig)
 
-    return {"T_sw": T_sw, "c_K": c_K, "T_K0": T_K0, "key_raw": key_raw, "tip": tip,
+    return {"in_hand": in_hand, "G_start": G_start, "T_initial": T_initial,
+            "T_sw": T_sw, "c_K": c_K, "T_K0": T_K0, "key_raw": key_raw, "tip": tip,
             "head_w": head_w, "scr_c": scr_c, "j_scr": j_scr, "j_z": j_z,
             "box_c": box_c, "box_h": box_h}
 
@@ -809,15 +818,19 @@ def run(mode: str):
     T_K0 = h["T_K0"]
 
     # ── arm start: parked above the pick, elbow-up branch ───────────────
-    T_tcp_pick = T_K0 @ G_NOM
+    in_hand = h["in_hand"]
+    if in_hand and not GS.GS_ON:
+        raise ValueError("AK_START_IN_HAND requires GelSight")
+    T_tcp_pick = h["T_initial"] @ h["G_start"]
     p_pick, R_pick = T_tcp_pick[:3, 3], T_tcp_pick[:3, :3]
-    p_park = p_pick + np.array([0.0, 0.0, 0.060])
+    p_park = p_pick.copy() if in_hand else p_pick + np.array([0.0, 0.0, 0.060])
     jq = rig.ik.joint_q.numpy()
     jq[0, :7] = ARM_SEED
     rig.ik.joint_q.assign(jq)
     q_start = rig.solve_arm_start(p_park, HP.quat_of_R(R_pick))
-    b.joint_q[7:9] = [F_OPEN_DOF, F_OPEN_DOF]
-    b.joint_target_q[7:9] = [F_OPEN_DOF, F_OPEN_DOF]
+    f_start = F_TOUCH_DOF - 0.3 * MM if in_hand else F_OPEN_DOF
+    b.joint_q[7:9] = [f_start, f_start]
+    b.joint_target_q[7:9] = [f_start, f_start]
     T_off = HP.tcp_offset_from_link7(rig)
     print(f"[{name}] arm start q {np.round(q_start[:7], 3)}, TCP err "
           f"{np.linalg.norm(rig.ik.tcp_pose()[:3] - p_park) / MM:.2f} mm")
@@ -984,6 +997,10 @@ def run(mode: str):
               psi_seat=None, tau_pk=0.0, unw_ok=0,
               grip_stable_frames=0, grip_lost_frames=0, grasp_ref=None,
               lift_preload=False)
+    if in_hand:
+        st.update(ph="hold", t_start={"hold": 0.0}, G=h["G_start"].copy(),
+                  f=f_start, trim=f_start-F_CLOSE_DOF, t_starts=[("hold", 0.0)])
+        print("[AK_IN_HAND] free tool initialized in operating pose", flush=True)
     key_com_z0 = float((key_T(rig.s0.body_q.numpy())[:3, :3] @
                         h["key_raw"].center_mass + key_T(rig.s0.body_q.numpy())[:3, 3])[2])
     order = ORDER
@@ -1240,7 +1257,11 @@ def run(mode: str):
                     st["grip_stable_frames"] = 0
                 elif st["lift_preload"] and stable_s >= GS_LIFT_PRELOAD_S:
                     st["grasp_ref"] = np.linalg.inv(Tt) @ TK
-                    go("lift", t)
+                    if in_hand:
+                        st["G"] = np.linalg.inv(TK) @ Tt
+                        go("hover", t)
+                    else:
+                        go("lift", t)
                 elif t - st["t0"] >= GS_HOLD_MAX_S:
                     raise _GraspFailure(
                         f"bilateral GelSight grip did not remain above "
@@ -1666,27 +1687,37 @@ def verdict(rig, mode, name, paths, log, st, h, weight, q0):
 
     crit = {}
     # ── picked up from the table by a fingertip pinch ───────────────────
-    rest0 = win(0.2, ts["descend"])
-    lift_w = win(ts["lift"], ts["tilt"])
-    held = win(ts["lift"] + 0.3, ts["open"])
-    both = float(((L["padL"][held] > 0.5) & (L["padR"][held] > 0.5)).mean())
-    rise = float((L["com_z"][lift_w].max() - L["com_z"][0]) / MM)
-    tab_air = float(L["table"][win(ts["lift"] + 0.5, ts["lower"])].max())
-    crit["picked_up_from_table"] = {
-        "pass": bool(abs(L["table_fz"][rest0].mean() - weight) < 0.3 * weight and rise > 50.0
-                     and both > 0.98 and tab_air < 0.01),
-        "table_support_at_start_N": round(float(L["table_fz"][rest0].mean()), 4),
-        "key_weight_N": round(weight, 4),
-        "lift_mm": round(rise, 1),
-        "both_pads_loaded_fraction_while_held": round(both, 3),
-        "pad_force_mean_while_held_N": [round(float(L["padL"][held].mean()), 2),
-                                        round(float(L["padR"][held].mean()), 2)],
-        "pad_force_min_while_held_N": [round(float(L["padL"][held].min()), 2),
-                                       round(float(L["padR"][held].min()), 2)],
-        "table_contact_in_air_max_N": round(tab_air, 4),
-        "note": "lying flat on the table at t=0; a top-down pinch across the long leg's "
-                "5 mm width; no joint, weld or kinematic attachment exists between the "
-                "robot and the key"}
+    if h["in_hand"]:
+        held = win(ts["hover"], ts["open"])
+        both = float(((L["padL"][held] > 0.5) & (L["padR"][held] > 0.5)).mean())
+        tab_air = float(L["table"][win(ts["hover"], ts["lower"])].max())
+        crit["initially_held_tool"] = {
+            "pass": bool(both > 0.98 and tab_air < 0.01),
+            "both_pads_loaded_fraction_while_held": both,
+            "table_contact_in_air_max_N": tab_air,
+            "note": "free rigid tool initialized between pads; no attachment"}
+    else:
+        rest0 = win(0.2, ts["descend"])
+        lift_w = win(ts["lift"], ts["tilt"])
+        held = win(ts["lift"] + 0.3, ts["open"])
+        both = float(((L["padL"][held] > 0.5) & (L["padR"][held] > 0.5)).mean())
+        rise = float((L["com_z"][lift_w].max() - L["com_z"][0]) / MM)
+        tab_air = float(L["table"][win(ts["lift"] + 0.5, ts["lower"])].max())
+        crit["picked_up_from_table"] = {
+            "pass": bool(abs(L["table_fz"][rest0].mean() - weight) < 0.3 * weight and rise > 50.0
+                         and both > 0.98 and tab_air < 0.01),
+            "table_support_at_start_N": round(float(L["table_fz"][rest0].mean()), 4),
+            "key_weight_N": round(weight, 4),
+            "lift_mm": round(rise, 1),
+            "both_pads_loaded_fraction_while_held": round(both, 3),
+            "pad_force_mean_while_held_N": [round(float(L["padL"][held].mean()), 2),
+                                            round(float(L["padR"][held].mean()), 2)],
+            "pad_force_min_while_held_N": [round(float(L["padL"][held].min()), 2),
+                                           round(float(L["padR"][held].min()), 2)],
+            "table_contact_in_air_max_N": round(tab_air, 4),
+            "note": "lying flat on the table at t=0; a top-down pinch across the long leg's "
+                    "5 mm width; no joint, weld or kinematic attachment exists between the "
+                    "robot and the key"}
 
     # ── the screw ───────────────────────────────────────────────────────
     t_probe = ts.get("probe", t_end)
@@ -1824,7 +1855,7 @@ def verdict(rig, mode, name, paths, log, st, h, weight, q0):
 
     # ── put back on the table ───────────────────────────────────────────
     fin = win(ts.get("still", t_end), t_end)
-    p0 = np.array([L["key_x"][0], L["key_y"][0]])
+    p0 = (h["T_K0"] @ np.r_[h["c_K"], 1.0])[:2] if h["in_hand"] else np.array([L["key_x"][0], L["key_y"][0]])
     pf = np.array([L["key_x"][fin][-1], L["key_y"][fin][-1]])
     disp = float(np.linalg.norm(pf - p0) / MM)
     comv = float(np.abs(np.diff(L["com_z"][fin])).max() * rig.fps / MM) if fin.sum() > 1 else 0.0
@@ -1878,10 +1909,10 @@ def verdict(rig, mode, name, paths, log, st, h, weight, q0):
     # in-hand twist of the key about its own leg: K_y seen from link7,
     # relative to the pose measured at lifthold
     k7 = np.c_[L["ky7x"], L["ky7y"], L["ky7z"]]
-    i_ref = int(np.searchsorted(t, ts["carry"]))
+    i_ref = int(np.searchsorted(t, ts.get("carry", ts.get("hover", 0.0))))
     ref = k7[i_ref] / np.linalg.norm(k7[i_ref])
     tw = np.degrees(np.arccos(np.clip(k7 @ ref / np.linalg.norm(k7, axis=1), -1.0, 1.0)))
-    held_m = np.isin(ph_names, list(HELD)) & (t >= ts["carry"])
+    held_m = np.isin(ph_names, list(HELD)) & (t >= ts.get("carry", ts.get("hover", 0.0)))
     spikes = {}
     for k in ("padL", "padR"):
         dev = L[k][1:-1] - 0.5 * (L[k][:-2] + L[k][2:])
@@ -1947,8 +1978,8 @@ def verdict(rig, mode, name, paths, log, st, h, weight, q0):
     qa.report["pass"] = all(c.get("pass", True) for c in qa.report["checks"].values())
     report = rig.finish(qa)
     changes = [
-        "starts with the Allen key lying flat on the table (appendix: in hand); picked up "
-        "by a top-down pinch across the long leg, put back where it was at the end",
+        ("starts with a free Allen key between the pads in operating pose; returns to table" if h["in_hand"] else
+         "starts with the Allen key lying flat on the table; picked up by a top-down pinch and returned"),
         "kit parts (assets/bodies_kit/allen_key, screw_block); no sim Allen-key task existed",
         "the long leg drives the screw: the key is tilted 90 deg in free air by the hand "
         "(horizontal hand), and the hand ORBITS the screw axis to turn it; strokes of "
