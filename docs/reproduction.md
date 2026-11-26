@@ -545,15 +545,9 @@ python -m force_bench.ftp1.preview_tactile \
   --episode "$(find outputs/datasets/card_ftp1_raw -name metadata.json -print -quit | xargs dirname)" \
   --index 0 --output outputs/datasets/ftp1/tactile_preview.png
 
-# Official upstream normalization launcher; train split only for formal datasets.
-export FTP1_REPO_ID=contactbench_retrieve_card
-export FTP1_CONFIG=packages/force-bench/config/ftp1/dataset_contactbench.json
-export FTP1_CACHE="$HOME/contactbench_models/ftp1"
-# Set these variables in the copied upstream launcher before execution:
-# repo_id=$FTP1_REPO_ID; dataset_config_path=$FTP1_CONFIG;
-# checkpoint_base_dir=$FTP1_CACHE/checkpoints; assets_base_dir=$FTP1_CACHE/assets;
-# norm_sample_ratio=1.0; val_ratio=0.2
-bash third_party/ftp1-policy/scripts_exp_zarr/univtac/compute_norm_stats_univtac_example.sh
+# Official FTP-1 normalization entry point with ContactBench config and cache paths.
+CONTACTBENCH_FTP1_CACHE=/home/$USER/contactbench_models/ftp1 \
+  bash scripts/compute_norm_stats_ftp1.sh
 
 # User-authorized later, not executed during this change:
 python -m pytest packages/force-bench/tests/test_ftp1_adapter.py
