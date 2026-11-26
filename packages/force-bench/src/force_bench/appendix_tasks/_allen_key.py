@@ -1138,8 +1138,7 @@ def run(mode: str):
         band = (GS_LIFT_GRIP_BAND if lift_grip else
                 (GS_PICK_GRIP_BAND if GS.GS_ON and st["ph"] == "hold"
                  else GRIP_BAND))
-        trim_step = GS_GRIP_TRIM_STEP if GS.GS_ON and st["ph"] in (
-            "hold", "lift", "lifthold") else GRIP_TRIM_STEP
+        trim_step = GS_GRIP_TRIM_STEP if GS.GS_ON else GRIP_TRIM_STEP
         trim_max = GS_GRIP_TRIM_MAX if GS.GS_ON else GRIP_TRIM_MAX
         bilateral_control = GS.GS_ON and st["ph"] in HELD
         low = min(left, right) if bilateral_control else F
@@ -1275,7 +1274,15 @@ def run(mode: str):
             p = st["from_p"] + (p_t - st["from_p"]) * u
             R = slerpR(st["from_R"], R_t, u)
             if t - st["t0"] >= T["carry"]:
-                go("tilt", t)
+                if not GS.GS_ON:
+                    go("tilt", t)
+                else:
+                    ready = min(last("padL"), last("padR")) >= GRIP_BAND[0] and max(last("padL"), last("padR")) <= GRIP_BAND[1]
+                    st["carry_ready_frames"] = st.get("carry_ready_frames", 0) + 1 if ready else 0
+                    if st["carry_ready_frames"] >= max(1, int(round(0.3 * rig.fps))):
+                        go("tilt", t)
+                    elif t - st["t0"] >= T["carry"] + 5.0:
+                        raise _GraspFailure("working grip not established before tilt")
         elif ph == "tilt":
             T_h = key_drive_pose(st["psi_start"], head + HOVER_DZ)
             _, R_h = tcp_for_key(T_h)
