@@ -31,3 +31,25 @@ def test_action_decode_uses_pose_and_absolute_gripper_slot():
 
 def test_prompt_has_required_punctuation():
     assert PROMPT=="pick up the thin object on the table."
+
+
+def test_causal_roundoff_boundary():
+    source = np.array([0.0, 0.05 + 1e-13, 0.1])
+    assert causal_indices(source, [0.05, 0.099])[0] == 1
+    assert causal_indices(source, [0.05, 0.099])[1] == 1
+
+
+def test_quantized_tactile_age():
+    from force_bench.ftp1.audit_data import validate_source_age
+    source = np.ceil(np.arange(24) * 60 / 24) / 60
+    target = np.arange(24) / 24
+    idx = causal_indices(source, target)
+    validate_source_age(target, source[idx], "tactile_rgb", 24)
+    validate_source_age(np.array([0.05]), np.array([0.0]), "tactile_rgb", 24)
+
+
+@pytest.mark.parametrize("source", [-0.051, 0.001])
+def test_tactile_age_rejects_missing_or_future(source):
+    from force_bench.ftp1.audit_data import validate_source_age
+    with pytest.raises(ValueError, match="tactile_rgb.*row=0"):
+        validate_source_age(np.array([0.0]), np.array([source]), "tactile_rgb", 24)
