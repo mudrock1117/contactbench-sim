@@ -41,7 +41,7 @@ def prepare_observation(wrapper, wrist_rgb, tactile_rgb, gripper_width_m):
     relative wrist state is identity (9D); the scalar gripper width is absolute.
     FTP1InferenceWrapper performs its configured domain/shared normalization.
     """
-    from openpi.shared.image_tools import resize_with_pad
+    from openpi_client.image_tools import resize_with_pad
     import cv2
     wrist = np.asarray(wrist_rgb)
     tactile = np.asarray(tactile_rgb)
