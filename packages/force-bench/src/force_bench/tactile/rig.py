@@ -310,7 +310,13 @@ class GelSightRig(Rig):
         # gel: physics slab 2t thick, sensing face at
         # y = -(CASE_PROUD + GEL_PROUD_OF_CASE); slab centre t behind it
         face_y = -(CASE_PROUD + GEL_PROUD_OF_CASE)
-        xf = wp.transform(wp.vec3(0.0, face_y + t, case_z), q_gel)
+        # Optional experimental cartridge offset toward the fingertip.
+        # Housing and backing remain in their original positions.
+        gel_tip_shift = float(os.environ.get("GS_CASE_GEL_TIP_SHIFT_MM", "0")) * 1e-3
+        if not np.isfinite(gel_tip_shift) or not 0.0 <= gel_tip_shift <= 0.0025:
+            raise ValueError("GS_CASE_GEL_TIP_SHIFT_MM must be within [0, 2.5]")
+        xf = wp.transform(wp.vec3(0.0, face_y + t, case_z + gel_tip_shift), q_gel)
+        print(f"[gelsight] cartridge tip shift {gel_tip_shift*1e3:.3f} mm", flush=True)
         self.gel_shapes[pad] = attach_gelsight_pad(
             b, body, cfg, xform=xf, label=pad,
             physics_thickness_m=2.0 * t, as_mesh=as_mesh,
