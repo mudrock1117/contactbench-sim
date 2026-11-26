@@ -53,9 +53,8 @@ class TactileRGBCapture:
         }
 
     def _due(self, timestamp):
-        return not any(ts for ts in self.timestamps.values()) or (
-            timestamp + 1e-12 >= (sum(bool(ts) for ts in self.timestamps.values()) + 1) / self.fps
-        )
+        next_frame = len(self.timestamps[PAD_ORDER[0]]) + 1
+        return timestamp + 1e-12 >= next_frame / self.fps
 
     def capture(self, timestamp):
         if self._closed:
