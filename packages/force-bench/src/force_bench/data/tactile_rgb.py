@@ -46,9 +46,10 @@ class TactileRGBCapture:
             "input": "HydroelasticGelSight TactileFrame.normal_displacement_m",
             "optical_pipeline": "raster_to_image -> polycalib.npz + bg.png Taxim shading",
             "sensor_id": SENSOR_ID, "pad_order": list(PAD_ORDER),
+            "native_shape": [320, 240, 3],
             "images": "rgb/tactile/<pad>/images/%06d.png",
             "timestamps": "rgb/tactile/<pad>/timestamps.npy",
-            "resize": "native GelSight Mini 240x320 RGB; official Zarr loader resizes to 224x224",
+            "resize": "native GelSight Mini 320x240 RGB; official Zarr loader resizes to 224x224",
             "headless": True,
         }
 
@@ -73,7 +74,7 @@ class TactileRGBCapture:
             frame = frames[-1]
             indent = self._raster_to_image(np.asarray(frame.normal_displacement_m))
             image = np.asarray(self.renderer.render(indent)).copy()
-            if image.dtype != np.uint8 or image.shape != (240, 320, 3):
+            if image.dtype != np.uint8 or image.shape != (320, 240, 3):
                 raise ValueError(f"Taxim returned invalid RGB for {pad}: {image.shape} {image.dtype}")
             import imageio.v2 as iio
             index = len(self.timestamps[pad])

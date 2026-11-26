@@ -48,7 +48,7 @@ reuse it only if it contains the four A4 FK/anchor arrays. Otherwise collect int
 a new directory (never overwrite old data):
 
     conda activate contactbench
-    TB_COLLECT_DIR=outputs/datasets/card_multimodal_a4 TB_COLLECT_TASK=retrieve_card_from_deck TB_COLLECT_RGB=1 TB_COLLECT_RGB_MODE=wrist TB_COLLECT_RGB_FPS=12 python -m force_bench.appendix_tasks.retrieve_card_from_deck
+    TB_COLLECT_DIR=outputs/datasets/card_multimodal_a4 TB_COLLECT_TASK=retrieve_card_from_deck TB_COLLECT_RGB=1 TB_COLLECT_RGB_CAMERAS=wrist TB_COLLECT_RGB_FPS=12 python -m force_bench.appendix_tasks.retrieve_card_from_deck
 
 Smoke and paper runs:
 
@@ -274,7 +274,7 @@ columns), and absolute total gripper width in metres.
 
 Only the wrist camera is real. It is provided as `left_wrist_0_rgb`; the base
 and right-wrist placeholders are zero images with masks set false. Original
-240x320 RGB is resized with aspect-ratio-preserving zero padding by the official
+320x240 RGB is resized with aspect-ratio-preserving zero padding by the official
 `ResizeImages(224,224)` transform. State is the current TCP relative to itself
 (identity rotation and zero translation) plus measured gripper width. The prompt
 is `pick up the thin object on the table`. Images are selected causally at
@@ -479,7 +479,8 @@ Collection is opt-in and independent of the DP/RDP/pi0.5 RGB/marker controls:
 ```bash
 TB_COLLECT_DIR=outputs/datasets/card_ftp1_raw \
 TB_COLLECT_TASK=retrieve_card_from_deck \
-TB_COLLECT_RGB=1 TB_COLLECT_RGB_MODE=wrist TB_COLLECT_RGB_FPS=12 \
+TB_COLLECT_RGB=1 TB_COLLECT_RGB_CAMERAS=wrist TB_COLLECT_RGB_FPS=12 \
+TB_GELSIGHT=1 \
 TB_COLLECT_TACTILE_RGB=1 TB_COLLECT_TACTILE_RGB_FPS=24 \
 python -m force_bench.appendix_tasks.retrieve_card_from_deck
 ```
@@ -487,7 +488,7 @@ python -m force_bench.appendix_tasks.retrieve_card_from_deck
 Physics remains 60 Hz and the expert/task configuration is unchanged. Existing `Rig.run`
 calls `RigCollector.after_step` after each completed physics frame. The new capture
 samples both current Hydrogel pads at post-step timestamps on a 24 Hz due schedule.
-No initial image is fabricated: first policy row starts at the first real tactile frame.
+No initial image is fabricated: first policy row starts at the first real tactile frame. Collection requires `TB_GELSIGHT=1` so both Hydrogel sensors exist.
 Wrist RGB remains the existing wrist camera stream at 12 Hz. Conversion selects only
 latest images/state timestamps `<=` each 24 Hz policy timestamp; timestamps and ages
 are audit data, so repeated wrist frames are expected and future observation leakage is
@@ -497,7 +498,7 @@ The optical path is the actual CPU renderer:
 `HydroelasticGelSight.sample(...).normal_displacement_m` →
 `hydrogel.render.raster_to_image` → `TaximRenderer.render`. `TaximRenderer` loads the
 vendored GelSight Mini `polycalib.npz` and `bg.png`, returning native uint8 RGB
-`(240,320,3)`. No pressure visualization, marker overlay, or placeholder image is
+`(320,240,3)`. No pressure visualization, marker overlay, or placeholder image is
 used. It opens no window and is intended to work headlessly; runtime/headless behavior
 has **not** been executed in this code-only change. FTP-1's pinned Zarr loader resizes
 image tactile data with OpenCV `cv2.resize(...,(224,224))`; wrapper inference uses the
@@ -512,18 +513,26 @@ then shared, state/tactile normalization. Sensor input metadata is
 | --- | --- |
 | `timestamps` | causal 24 Hz policy grid in simulation seconds |
 | `right_wrist_camera_rgb` | existing wrist RGB stream; causal hold-last |
-| `right_wrist_pose` | measured command-start TCP world pose, xyz + rotvec |
+| `right_wrist_pose` | measured command-start TCP world pose, xyz + rotvec; official pose supervision is trajectory-derived, not exact A4 command targets |
 | `right_hand_joints` / `right_hand_joints_idx` | measured absolute width (m), index 28 |
-| `right_tactile_data_gripper` | Taxim uint8 RGB, [time, gel_left/gel_right, 240,320,3] |
+| `right_tactile_data_gripper` | Taxim uint8 RGB, [time, gel_left/gel_right, 320,240,3] |
 | `right_tactile_area_gripper` | repeated [0,1] |
 | `right_tactile_sensor_gripper` | `GelSightMini` |
 | `right_tactile_type_gripper` | `image` |
 | `sub_task_instruction` | exact `pick up the thin object on the table.` |
 
-The official loader builds the default 120D UAS; only the right wrist pose 9D and
-canonical hand slot 28 (flat action index 44) are valid, i.e. 10 active dimensions.
+The official loader builds the default 120D UAS. Its pinned layout API
+`get_ftp1_action_group_slices(48, 7, 15)` defines right wrist pose at [0:9],
+right arm joints at [9:16], right canonical hand block [16:48], left arm thereafter,
+head/reserved fields last. Gripper hand slot 28 is therefore flat action index 44.
+The adapter queries these official group slices and the official gripper-slot
+constant rather than assuming the first nine and a magic gripper index.
 It derives pose targets from the world-frame `right_wrist_pose` trajectory and applies
-`action_pose_rep=relative` once against the current anchor. Configure
+`action_pose_rep=relative` once against the current anchor. ContactBench records
+measured command-start TCP states in that standard field; exact A4 FK command targets
+are retained only in extra provenance arrays. Therefore the official pose labels are
+trajectory/state-derived and are not claimed to be equivalent to exact commanded
+targets. Configure
 `action_joint_rep=mix` so hand slot 28 remains absolute. `decode_action_chunk` extracts
 the first 9 pose values and flat index 44; do not convert pose to relative twice.
 The pinned loader has no dedicated A4 command-target Zarr key: exact recorded command

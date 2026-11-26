@@ -1,12 +1,13 @@
 """Causal ContactBench episode conversion helpers for the official FTP-1 Zarr loader."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
 
 POLICY_HZ = 24.0
+NATIVE_TACTILE_SHAPE = (320, 240, 3)
+TAXIM_RENDERER = "hydrogel.render.TaximRenderer.render"
 PROMPT = "pick up the thin object on the table."
 PAD_ORDER = ("gel_left", "gel_right")
 
@@ -27,15 +28,24 @@ def causal_indices(source_timestamps, target_timestamps):
     return indices.astype(np.int64)
 
 
-def _read_rgb_stream(root, relative):
+def _read_rgb_stream(root, relative, *, image_shape=None):
     import imageio.v2 as iio
     directory = Path(root) / relative
     times = np.load(directory / "timestamps.npy", allow_pickle=False)
     files = sorted((directory / "images").glob("*.png"))
-    if len(files) != len(times) or not len(files):
-        raise ValueError(f"incomplete RGB stream: {directory}")
-    images = [np.asarray(iio.imread(p), dtype=np.uint8) for p in files]
-    return times, images
+    expected_names = [f"{i:06d}.png" for i in range(len(times))]
+    if (times.ndim != 1 or not len(times) or not np.isfinite(times).all()
+            or (len(times) > 1 and np.any(np.diff(times) <= 0))
+            or [p.name for p in files] != expected_names):
+        raise ValueError(f"incomplete or unordered RGB stream: {directory}")
+    images = []
+    for path in files:
+        image = np.asarray(iio.imread(path))
+        if (image.dtype != np.uint8 or image.ndim != 3 or image.shape[-1] != 3
+                or (image_shape is not None and image.shape != image_shape)):
+            raise ValueError(f"invalid RGB image shape/type in {path}: {image.shape} {image.dtype}")
+        images.append(image.copy())
+    return times.astype(np.float64, copy=False), images
 
 
 def _quat_to_rotvec(quat_xyzw):
@@ -55,22 +65,42 @@ def episode_to_ftp1(episode_path):
         raise ValueError("episode lacks the A4 fixed-reference TCP command audit fields")
     if "action_tcp_target_world_xyzw" not in arrays or "action_gripper_width_m" not in arrays:
         raise ValueError("episode lacks exact A4 command targets")
-    if "tactile_rgb" not in meta:
-        raise ValueError("episode lacks opt-in real tactile RGB")
-    timestamps = arrays["timestamps"]
-    if timestamps.dtype != np.float64 or len(timestamps) != len(arrays["actions"]) + 1:
-        raise ValueError("episode timestamp/action alignment is invalid")
+    tactile_meta = meta.get("tactile_rgb", {})
+    if (tactile_meta.get("enabled") is not True
+            or tactile_meta.get("renderer") != TAXIM_RENDERER
+            or tactile_meta.get("sensor_id") != "GelSightMini"
+            or tactile_meta.get("pad_order") != list(PAD_ORDER)
+            or tuple(tactile_meta.get("native_shape", ())) != NATIVE_TACTILE_SHAPE):
+        raise ValueError("episode lacks real calibrated Taxim GelSightMini RGB in left/right 320x240 order")
+    timestamps = np.asarray(arrays["timestamps"], dtype=np.float64)
+    actions = np.asarray(arrays["actions"])
+    observations = np.asarray(arrays["observations"])
+    if (timestamps.ndim != 1 or not np.isfinite(timestamps).all()
+            or np.any(np.diff(timestamps) <= 0)
+            or len(timestamps) != len(actions) + 1
+            or observations.shape[0] != len(timestamps)):
+        raise ValueError("episode timestamp/action/observation alignment is invalid")
+    for key in ("action_anchor_tcp_pose_world_xyzw", "action_tcp_target_world_xyzw",
+                "action_gripper_width_m"):
+        if len(arrays[key]) != len(actions):
+            raise ValueError(f"{key} must have one command-start value per action")
     root = Path(episode_path)
     tactile = []
     tactile_times = None
     for pad in PAD_ORDER:
-        ts, images = _read_rgb_stream(root, f"rgb/tactile/{pad}")
+        ts, images = _read_rgb_stream(root, f"rgb/tactile/{pad}", image_shape=NATIVE_TACTILE_SHAPE)
         if tactile_times is None:
             tactile_times = ts
         elif not np.array_equal(ts, tactile_times):
             raise ValueError("left/right tactile RGB timestamps must align")
         tactile.append(images)
+    if len(tactile_times) < 2 or not any(
+            np.any(frame != images[0]) for images in tactile for frame in images[1:]):
+        raise ValueError("optical tactile RGB is static; refusing conversion")
     wrist_times, wrist_images = _read_rgb_stream(root, "rgb/wrist")
+    if (tactile_times[0] < timestamps[0] - 1e-9 or tactile_times[-1] > timestamps[-1] + 1e-9
+            or wrist_times[0] < timestamps[0] - 1e-9 or wrist_times[-1] > timestamps[-1] + 1e-9):
+        raise ValueError("RGB timestamps fall outside episode timestamp bounds")
     # Policy grid begins at the first optical observation, then uses exact 24Hz
     # ticks. Each state/image lookup is latest-at-or-before-tick only.
     end = float(timestamps[-2])
@@ -80,7 +110,7 @@ def episode_to_ftp1(episode_path):
     obs_idx = causal_indices(timestamps[:-1], times)
     wrist_idx = causal_indices(wrist_times, times)
     tactile_idx = causal_indices(tactile_times, times)
-    obs = arrays["observations"][obs_idx]
+    obs = observations[obs_idx]
     anchors = arrays["action_anchor_tcp_pose_world_xyzw"][obs_idx]
     gripper = obs[:, 7:9].sum(axis=1).astype(np.float32)
     if not np.isfinite(gripper).all():
@@ -109,4 +139,7 @@ def episode_to_ftp1(episode_path):
         "contactbench_a4_action_target_world_xyz_rotvec": command_pose,
         "contactbench_a4_action_gripper_width_m": command_width,
         "contactbench_time_alignment": np.stack((obs_idx, wrist_idx, tactile_idx), axis=1).astype(np.int64),
+        "contactbench_observation_timestamps": timestamps[:-1][obs_idx],
+        "contactbench_wrist_rgb_timestamps": wrist_times[wrist_idx],
+        "contactbench_tactile_rgb_timestamps": tactile_times[tactile_idx],
     }
