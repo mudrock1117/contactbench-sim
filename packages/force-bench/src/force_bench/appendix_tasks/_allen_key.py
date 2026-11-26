@@ -294,7 +294,7 @@ GRIP_TRIM_STEP = 0.005 * MM    # outside it (m per frame) ...
 GRIP_TRIM_MAX = 1.0 * MM       # ... within +-1 mm of F_CLOSE_DOF
 GS_PICK_GRIP_BAND = (0.8, 2.5) # soft-gel pick/hold/lift; later phases use GRIP_BAND
 GS_HOLD_STABLE_S = 0.20
-GS_HOLD_MAX_S = 1.50
+GS_HOLD_MAX_S = _env("AK_GS_HOLD_MAX_S", 1.50)
 GS_LIFT_LOST_FORCE_N = 0.5
 GS_LIFT_GRIP_BAND = (
     _env("AK_GS_LIFT_FORCE_MIN_N", 1.2),
@@ -1135,7 +1135,8 @@ def run(mode: str):
     def grip_cmd():
         """Finger target: F_CLOSE_DOF plus a slow admittance trim that only
         acts when the mean pad force leaves GRIP_BAND (GelSight readiness)."""
-        F = 0.5 * (last("padL") + last("padR"))
+        left, right = last("padL"), last("padR")
+        F = 0.5 * (left + right)
         lift_grip = GS.GS_ON and (st["ph"] in ("lift", "lifthold") or
                                   (st["ph"] == "hold" and st["lift_preload"]))
         band = (GS_LIFT_GRIP_BAND if lift_grip else
@@ -1145,10 +1146,23 @@ def run(mode: str):
             "hold", "lift", "lifthold") else GRIP_TRIM_STEP
         trim_max = GS_GRIP_TRIM_MAX if GS.GS_ON and st["ph"] in (
             "hold", "lift", "lifthold") else GRIP_TRIM_MAX
-        if F < band[0]:
-            st["trim"] = max(-trim_max, st["trim"] - trim_step)
-        elif F > band[1]:
+        bilateral_control = GS.GS_ON and st["ph"] in ("hold", "lift", "lifthold")
+        low = min(left, right) if bilateral_control else F
+        high = max(left, right) if bilateral_control else F
+        if high > band[1]:
             st["trim"] = min(trim_max, st["trim"] + trim_step)
+        elif low < band[0]:
+            st["trim"] = max(-trim_max, st["trim"] - trim_step)
+        if bilateral_control:
+            conflict = low < band[0] and high > band[1]
+            count = st.get("grip_diag_count", 0)
+            st["grip_diag_count"] = count + 1
+            if count % max(1, int(rig.fps / 5)) == 0 or (conflict and not st.get("grip_diag_conflict", False)):
+                print(f"[AK_GRIP] phase={st['ph']} L={left:.3f} R={right:.3f} "
+                      f"min={low:.3f} max={high:.3f} mean={F:.3f} band={band} "
+                      f"trim_mm={st['trim']/MM:.3f} stable_frames={st['grip_stable_frames']} "
+                      f"lift_preload={st['lift_preload']} conflict={conflict}", flush=True)
+            st["grip_diag_conflict"] = conflict
         return F_CLOSE_DOF + st["trim"]
 
     def end_stroke(t, q):
