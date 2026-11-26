@@ -303,6 +303,9 @@ GS_LIFT_GRIP_BAND = (
 GS_LIFT_PRELOAD_S = _env("AK_GS_LIFT_PRELOAD_S", 0.15)
 GS_GRIP_TRIM_STEP = _env("AK_GS_TRIM_STEP_MM", 0.02) * MM
 GS_GRIP_TRIM_MAX = _env("AK_GS_TRIM_MAX_MM", 1.5) * MM
+GS_FREE_GRIP_BAND = (3.0, 4.5)
+GS_WORK_GRIP_BAND = (5.0, 6.5)
+GS_MIN_FACE_GAP = 1.0 * MM
 IMPRATIO = 10.0                # small-part pinch (plug_in_usb / hang_* lesson)
 # pad fingertip collision box in the finger frame (FR3 URDF shape 47 / 53)
 PAD_BOX_C = np.array([0.0, 7.58, 45.25]) * MM
@@ -377,6 +380,7 @@ if GS.GS_ON:
     # The soft pads need a lower acceleration than the rigid fingertips. The
     # 80 mm move is unchanged; only its duration is GelSight-specific.
     T["lift"] = _env("AK_GS_LIFT_S", 1.8)
+    T["tilt"] = _env("AK_GS_TILT_S", 5.0)
 T_STILL_SETTLE = 0.4           # the arm tracker finishes the retreat in here
 PLACE_ABOVE = 0.025            # carry back to this far above the place pose
 T_INSERT_MAX = 3.0
@@ -1137,8 +1141,8 @@ def run(mode: str):
                                   (st["ph"] == "hold" and st["lift_preload"]))
         band = (GS_LIFT_GRIP_BAND if lift_grip else
                 (GS_PICK_GRIP_BAND if GS.GS_ON and st["ph"] == "hold"
-                 else GRIP_BAND))
-        trim_step = GS_GRIP_TRIM_STEP if GS.GS_ON else GRIP_TRIM_STEP
+                 else (GS_WORK_GRIP_BAND if st["ph"] in ("insert", "reinsert", "turn", "seat_hold", "extract") else GS_FREE_GRIP_BAND) if GS.GS_ON else GRIP_BAND))
+        trim_step = GS_GRIP_TRIM_STEP if GS.GS_ON and st["ph"] in ("hold", "lift", "lifthold") else GRIP_TRIM_STEP
         trim_max = GS_GRIP_TRIM_MAX if GS.GS_ON else GRIP_TRIM_MAX
         bilateral_control = GS.GS_ON and st["ph"] in HELD
         low = min(left, right) if bilateral_control else F
@@ -1157,6 +1161,9 @@ def run(mode: str):
                       f"trim_mm={st['trim']/MM:.3f} stable_frames={st['grip_stable_frames']} "
                       f"lift_preload={st['lift_preload']} conflict={conflict}", flush=True)
             st["grip_diag_conflict"] = conflict
+        if GS.GS_ON:
+            floor = PAD_FACE_OFF + GS.finger_offset() + 0.5 * GS_MIN_FACE_GAP
+            st["trim"] = max(st["trim"], floor - F_CLOSE_DOF)
         return F_CLOSE_DOF + st["trim"]
 
     def end_stroke(t, q):
@@ -1277,7 +1284,7 @@ def run(mode: str):
                 if not GS.GS_ON:
                     go("tilt", t)
                 else:
-                    ready = min(last("padL"), last("padR")) >= GRIP_BAND[0] and max(last("padL"), last("padR")) <= GRIP_BAND[1]
+                    ready = min(last("padL"), last("padR")) >= GS_FREE_GRIP_BAND[0] and max(last("padL"), last("padR")) <= GS_FREE_GRIP_BAND[1]
                     st["carry_ready_frames"] = st.get("carry_ready_frames", 0) + 1 if ready else 0
                     if st["carry_ready_frames"] >= max(1, int(round(0.3 * rig.fps))):
                         go("tilt", t)
