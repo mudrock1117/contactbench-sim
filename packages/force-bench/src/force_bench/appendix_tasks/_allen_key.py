@@ -294,7 +294,7 @@ GRIP_TRIM_STEP = 0.005 * MM    # outside it (m per frame) ...
 GRIP_TRIM_MAX = 1.0 * MM       # ... within +-1 mm of F_CLOSE_DOF
 GS_PICK_GRIP_BAND = (0.8, 2.5) # soft-gel pick/hold/lift; later phases use GRIP_BAND
 GS_HOLD_STABLE_S = 0.20
-GS_HOLD_MAX_S = _env("AK_GS_HOLD_MAX_S", 1.50)
+GS_HOLD_MAX_S = _env("AK_GS_HOLD_MAX_S", 3.0)
 GS_LIFT_LOST_FORCE_N = 0.5
 GS_LIFT_GRIP_BAND = (
     _env("AK_GS_LIFT_FORCE_MIN_N", 1.2),
@@ -937,11 +937,7 @@ def run(mode: str):
     droop = HP.DroopComp()
 
     def last(nm, key="force"):
-        if GS.GS_ON and nm in ("padL", "padR") and key == "force":
-            pad = "gel_left" if nm == "padL" else "gel_right"
-            frames = getattr(rig, "tactile_frames", {}).get(pad, ())
-            if frames:
-                return float(frames[-1].total_normal_force_n)
+        # PairProbe filters contacts to key shapes, unlike total gel load.
         hh = rig.probes[nm].history
         return hh[-1][key] if hh else 0.0
 
@@ -1144,9 +1140,8 @@ def run(mode: str):
                  else GRIP_BAND))
         trim_step = GS_GRIP_TRIM_STEP if GS.GS_ON and st["ph"] in (
             "hold", "lift", "lifthold") else GRIP_TRIM_STEP
-        trim_max = GS_GRIP_TRIM_MAX if GS.GS_ON and st["ph"] in (
-            "hold", "lift", "lifthold") else GRIP_TRIM_MAX
-        bilateral_control = GS.GS_ON and st["ph"] in ("hold", "lift", "lifthold")
+        trim_max = GS_GRIP_TRIM_MAX if GS.GS_ON else GRIP_TRIM_MAX
+        bilateral_control = GS.GS_ON and st["ph"] in HELD
         low = min(left, right) if bilateral_control else F
         high = max(left, right) if bilateral_control else F
         if high > band[1]:
@@ -1186,6 +1181,20 @@ def run(mode: str):
         head = Z0 + HEAD_TOP_Z + zsc            # MEASURED head top / recess floor
         floor = Z0 + RECESS_FLOOR_Z + zsc
         ph = st["ph"]
+        if GS.GS_ON and ph in HELD and ph != "hold":
+            lift = float((TK[:3, :3] @ h["key_raw"].center_mass + TK[:3, 3])[2]) - key_com_z0
+            relative = np.linalg.inv(Tt) @ TK
+            ref = st["grasp_ref"]
+            slip = float(np.linalg.norm(relative[:3, 3] - ref[:3, 3])) if ref is not None else 0.0
+            if slip > 0.010:
+                raise _GraspFailure(f"tool slipped relative to TCP in {ph}: {slip/MM:.2f} mm")
+            if ph == "lifthold" and lift < 0.050:
+                raise _GraspFailure(f"actual tool lift insufficient: {lift/MM:.2f} mm")
+            if ph not in ("lift", "lower"):
+                lost = min(last("padL"), last("padR")) < GS_LIFT_LOST_FORCE_N
+                st["grip_lost_frames"] = st["grip_lost_frames"] + 1 if lost else 0
+                if st["grip_lost_frames"] >= max(1, int(round(0.1 * rig.fps))):
+                    raise _GraspFailure(f"key-specific bilateral contact lost in {ph}")
         s5 = HP.smooth5
         f_cmd = st["f"]
         p, R = st["p"], st["R"]
@@ -1224,6 +1233,7 @@ def run(mode: str):
                     st["lift_preload"] = True
                     st["grip_stable_frames"] = 0
                 elif st["lift_preload"] and stable_s >= GS_LIFT_PRELOAD_S:
+                    st["grasp_ref"] = np.linalg.inv(Tt) @ TK
                     go("lift", t)
                 elif t - st["t0"] >= GS_HOLD_MAX_S:
                     raise _GraspFailure(
