@@ -1137,7 +1137,7 @@ def run(mode: str):
         # next insertion); the xy correction is re-learned by the end loop
         if in_hand and GS.GS_ON:
             spread = max(float(np.linalg.norm(g[:3, 3] - Gn[:3, 3])) for g in acc)
-            if min(last("padL"), last("padR")) < 2.5 or last("kscrew") > 0.1 or spread > 1.0 * MM:
+            if min(last("padL"), last("padR")) < 2.5 or last("key_screw") > 0.1 or spread > 1.0 * MM:
                 raise _GraspFailure("unstable free-tool pose during regrasp measurement")
             st["grasp_ref"] = np.linalg.inv(Gn)
             print(f"[AK_REGRASP] stable reference updated; spread_mm={spread/MM:.3f}", flush=True)
