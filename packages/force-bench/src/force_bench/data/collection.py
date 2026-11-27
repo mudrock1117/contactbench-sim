@@ -287,6 +287,16 @@ class RigCollector:
                 else next(iter(self.rgb.values())).parameters["mount"],
                 "fps": float(rgb_config["fps"]), "timebase": "simulation_seconds",
                 "cameras": {name: capture.metadata for name, capture in self.rgb.items()}}
+        self.tactile_rgb = None
+        tactile_rgb_enabled = os.environ.get("TB_COLLECT_TACTILE_RGB", "0") == "1"
+        if tactile_rgb_enabled:
+            if not self.has_tactile:
+                raise RuntimeError("TB_COLLECT_TACTILE_RGB=1 requires the Hydrogel GelSightRig")
+            from .tactile_rgb import TactileRGBCapture
+            fps = float(os.environ.get("TB_COLLECT_TACTILE_RGB_FPS", "24"))
+            self.tactile_rgb = TactileRGBCapture(
+                rig, output, self.writer.episode_id, fps=fps)
+            self.writer.metadata["tactile_rgb"] = self.tactile_rgb.metadata
         self.pending = None
 
     def after_control(self):
@@ -323,6 +333,8 @@ class RigCollector:
             extra["tactile_marker_valid"] = marker_valid
         for capture in self.rgb.values():
             capture.capture(self.rig.s0, timestamp)
+        if self.tactile_rgb is not None:
+            self.tactile_rgb.capture(timestamp)
         self.writer.append(action, self.observation.sample(), timestamp=timestamp, tactile=tactile,
                            tactile_valid=valid, extra=extra)
         self.pending = None
@@ -334,8 +346,9 @@ class RigCollector:
             self.writer.metadata["discarded_incomplete_transition"] = True
             self.pending = None
         attachments = None
-        if self.rgb:
+        if self.rgb or self.tactile_rgb is not None:
             attachments = {}
+        if self.rgb:
             counts = {}
             try:
                 for name, capture in self.rgb.items():
@@ -346,6 +359,14 @@ class RigCollector:
                     capture.abort()
                 raise
             self.writer.metadata["rgb"]["num_frames"] = counts
+        if self.tactile_rgb is not None:
+            try:
+                attachments["rgb/tactile"] = self.tactile_rgb.finish()
+            except BaseException:
+                self.tactile_rgb.abort()
+                raise
+            self.writer.metadata["tactile_rgb"]["num_frames"] = {
+                name: len(times) for name, times in self.tactile_rgb.timestamps.items()}
         path = self.writer.finish(truncated=True, outcome=outcome, attachments=attachments)
         print(f"[collection] wrote {path} ({len(self.writer.actions)} transitions; QA pending)")
         return path
@@ -353,6 +374,8 @@ class RigCollector:
     def abort(self):
         for capture in self.rgb.values():
             capture.abort()
+        if self.tactile_rgb is not None:
+            self.tactile_rgb.abort()
 
 
 def collector_from_env(rig):

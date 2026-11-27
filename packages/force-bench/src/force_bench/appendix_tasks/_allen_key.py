@@ -294,7 +294,7 @@ GRIP_TRIM_STEP = 0.005 * MM    # outside it (m per frame) ...
 GRIP_TRIM_MAX = 1.0 * MM       # ... within +-1 mm of F_CLOSE_DOF
 GS_PICK_GRIP_BAND = (0.8, 2.5) # soft-gel pick/hold/lift; later phases use GRIP_BAND
 GS_HOLD_STABLE_S = 0.20
-GS_HOLD_MAX_S = 1.50
+GS_HOLD_MAX_S = _env("AK_GS_HOLD_MAX_S", 3.0)
 GS_LIFT_LOST_FORCE_N = 0.5
 GS_LIFT_GRIP_BAND = (
     _env("AK_GS_LIFT_FORCE_MIN_N", 1.2),
@@ -303,6 +303,9 @@ GS_LIFT_GRIP_BAND = (
 GS_LIFT_PRELOAD_S = _env("AK_GS_LIFT_PRELOAD_S", 0.15)
 GS_GRIP_TRIM_STEP = _env("AK_GS_TRIM_STEP_MM", 0.02) * MM
 GS_GRIP_TRIM_MAX = _env("AK_GS_TRIM_MAX_MM", 1.5) * MM
+GS_FREE_GRIP_BAND = (3.0, 4.5)
+GS_WORK_GRIP_BAND = (5.0, 6.5)
+GS_MIN_FACE_GAP = 1.0 * MM
 IMPRATIO = 10.0                # small-part pinch (plug_in_usb / hang_* lesson)
 # pad fingertip collision box in the finger frame (FR3 URDF shape 47 / 53)
 PAD_BOX_C = np.array([0.0, 7.58, 45.25]) * MM
@@ -377,6 +380,7 @@ if GS.GS_ON:
     # The soft pads need a lower acceleration than the rigid fingertips. The
     # 80 mm move is unchanged; only its duration is GelSight-specific.
     T["lift"] = _env("AK_GS_LIFT_S", 1.8)
+    T["tilt"] = _env("AK_GS_TILT_S", 5.0)
 T_STILL_SETTLE = 0.4           # the arm tracker finishes the retreat in here
 PLACE_ABOVE = 0.025            # carry back to this far above the place pose
 T_INSERT_MAX = 3.0
@@ -687,7 +691,15 @@ def build_scene(rig, mode: str) -> dict:
     tip = subdiv(crop_box(key_raw, (KEY_TIP_CROP_X, None, None), (None, None, None)), 0.0006)
     bend = subdiv(crop_box(key_raw, (None, None, None), (KEY_BOX_X0, None, None)), 0.0012)
     T_K0 = key_flat_pose(KEY_YAW0, KEY_PINCH_XY)
-    T_B0 = T_K0 @ Tm(np.eye(3), c_K)
+    in_hand = os.environ.get("AK_START_IN_HAND", "0") == "1"
+    G_start = G_NOM.copy()
+    T_initial = T_K0.copy()
+    if in_hand:
+        G_start[1, 3] -= 6.0 * MM
+        q_init = q_unengaged() if mode == "tighten" else np.radians(LOOSEN_Q0_DEG)
+        psi_init = np.radians(congruent_psi(q_init, np.degrees(PSI_START[mode])))
+        T_initial = key_drive_pose(psi_init, Z0 + HEAD_TOP_Z - LEAD * q_init + HOVER_DZ + 20 * MM)
+    T_B0 = T_initial @ Tm(np.eye(3), c_K)
     key_body = b.add_body(xform=wp.transform(wp.vec3(*T_B0[:3, 3]),
                                              wp.quat(*HP.quat_of_R(T_B0[:3, :3]).tolist())),
                           label="allen_key")
@@ -719,7 +731,8 @@ def build_scene(rig, mode: str) -> dict:
     HP.filter_arm_links(rig, "allen_key")
     HP.filter_statics_and_ground(rig)
 
-    return {"T_sw": T_sw, "c_K": c_K, "T_K0": T_K0, "key_raw": key_raw, "tip": tip,
+    return {"in_hand": in_hand, "G_start": G_start, "T_initial": T_initial,
+            "T_sw": T_sw, "c_K": c_K, "T_K0": T_K0, "key_raw": key_raw, "tip": tip,
             "head_w": head_w, "scr_c": scr_c, "j_scr": j_scr, "j_z": j_z,
             "box_c": box_c, "box_h": box_h}
 
@@ -805,15 +818,19 @@ def run(mode: str):
     T_K0 = h["T_K0"]
 
     # ── arm start: parked above the pick, elbow-up branch ───────────────
-    T_tcp_pick = T_K0 @ G_NOM
+    in_hand = h["in_hand"]
+    if in_hand and not GS.GS_ON:
+        raise ValueError("AK_START_IN_HAND requires GelSight")
+    T_tcp_pick = h["T_initial"] @ h["G_start"]
     p_pick, R_pick = T_tcp_pick[:3, 3], T_tcp_pick[:3, :3]
-    p_park = p_pick + np.array([0.0, 0.0, 0.060])
+    p_park = p_pick.copy() if in_hand else p_pick + np.array([0.0, 0.0, 0.060])
     jq = rig.ik.joint_q.numpy()
     jq[0, :7] = ARM_SEED
     rig.ik.joint_q.assign(jq)
     q_start = rig.solve_arm_start(p_park, HP.quat_of_R(R_pick))
-    b.joint_q[7:9] = [F_OPEN_DOF, F_OPEN_DOF]
-    b.joint_target_q[7:9] = [F_OPEN_DOF, F_OPEN_DOF]
+    f_start = F_TOUCH_DOF - 0.3 * MM if in_hand else F_OPEN_DOF
+    b.joint_q[7:9] = [f_start, f_start]
+    b.joint_target_q[7:9] = [f_start, f_start]
     T_off = HP.tcp_offset_from_link7(rig)
     print(f"[{name}] arm start q {np.round(q_start[:7], 3)}, TCP err "
           f"{np.linalg.norm(rig.ik.tcp_pose()[:3] - p_park) / MM:.2f} mm")
@@ -937,11 +954,7 @@ def run(mode: str):
     droop = HP.DroopComp()
 
     def last(nm, key="force"):
-        if GS.GS_ON and nm in ("padL", "padR") and key == "force":
-            pad = "gel_left" if nm == "padL" else "gel_right"
-            frames = getattr(rig, "tactile_frames", {}).get(pad, ())
-            if frames:
-                return float(frames[-1].total_normal_force_n)
+        # PairProbe filters contacts to key shapes, unlike total gel load.
         hh = rig.probes[nm].history
         return hh[-1][key] if hh else 0.0
 
@@ -984,6 +997,10 @@ def run(mode: str):
               psi_seat=None, tau_pk=0.0, unw_ok=0,
               grip_stable_frames=0, grip_lost_frames=0, grasp_ref=None,
               lift_preload=False)
+    if in_hand:
+        st.update(ph="hold", t_start={"hold": 0.0}, G=h["G_start"].copy(),
+                  f=f_start, trim=f_start-F_CLOSE_DOF, t_starts=[("hold", 0.0)])
+        print("[AK_IN_HAND] free tool initialized in operating pose", flush=True)
     key_com_z0 = float((key_T(rig.s0.body_q.numpy())[:3, :3] @
                         h["key_raw"].center_mass + key_T(rig.s0.body_q.numpy())[:3, 3])[2])
     order = ORDER
@@ -1118,6 +1135,12 @@ def run(mode: str):
         # a slip of the key in the pinch is now in G itself, so the vertical
         # correction learned against the old G is dropped (re-learned in the
         # next insertion); the xy correction is re-learned by the end loop
+        if in_hand and GS.GS_ON:
+            spread = max(float(np.linalg.norm(g[:3, 3] - Gn[:3, 3])) for g in acc)
+            if min(last("padL"), last("padR")) < 2.5 or last("key_screw") > 0.1 or spread > 1.0 * MM:
+                raise _GraspFailure("unstable free-tool pose during regrasp measurement")
+            st["grasp_ref"] = np.linalg.inv(Gn)
+            print(f"[AK_REGRASP] stable reference updated; spread_mm={spread/MM:.3f}", flush=True)
         st["G"] = Gn
         st["corr"][2] = 0.0
         st["G_log"].append(np.round(Gn[:3, 3] / MM, 2).tolist())
@@ -1135,20 +1158,43 @@ def run(mode: str):
     def grip_cmd():
         """Finger target: F_CLOSE_DOF plus a slow admittance trim that only
         acts when the mean pad force leaves GRIP_BAND (GelSight readiness)."""
-        F = 0.5 * (last("padL") + last("padR"))
+        left, right = last("padL"), last("padR")
+        F = 0.5 * (left + right)
         lift_grip = GS.GS_ON and (st["ph"] in ("lift", "lifthold") or
                                   (st["ph"] == "hold" and st["lift_preload"]))
         band = (GS_LIFT_GRIP_BAND if lift_grip else
                 (GS_PICK_GRIP_BAND if GS.GS_ON and st["ph"] == "hold"
-                 else GRIP_BAND))
-        trim_step = GS_GRIP_TRIM_STEP if GS.GS_ON and st["ph"] in (
-            "hold", "lift", "lifthold") else GRIP_TRIM_STEP
-        trim_max = GS_GRIP_TRIM_MAX if GS.GS_ON and st["ph"] in (
-            "hold", "lift", "lifthold") else GRIP_TRIM_MAX
-        if F < band[0]:
-            st["trim"] = max(-trim_max, st["trim"] - trim_step)
-        elif F > band[1]:
+                 else (GS_WORK_GRIP_BAND if st["ph"] in ("insert", "reinsert", "turn", "seat_hold", "extract") else GS_FREE_GRIP_BAND) if GS.GS_ON else GRIP_BAND))
+        if in_hand and GS.GS_ON and mode == "tighten" and st["ph"] in ("reinsert", "turn", "seat_hold") and (st["seated"] or np.degrees(screw_qz()[0]) >= -10.0):
+            band = (10.0, 12.0)
+        trim_step = GS_GRIP_TRIM_STEP if GS.GS_ON and st["ph"] in ("hold", "lift", "lifthold") else GRIP_TRIM_STEP
+        trim_max = GS_GRIP_TRIM_MAX if GS.GS_ON else GRIP_TRIM_MAX
+        bilateral_control = GS.GS_ON and st["ph"] in HELD
+        low = min(left, right) if bilateral_control else F
+        high = max(left, right) if bilateral_control else F
+        if high > band[1]:
             st["trim"] = min(trim_max, st["trim"] + trim_step)
+        elif low < band[0]:
+            st["trim"] = max(-trim_max, st["trim"] - trim_step)
+        if bilateral_control:
+            conflict = low < band[0] and high > band[1]
+            count = st.get("grip_diag_count", 0)
+            st["grip_diag_count"] = count + 1
+            if count % max(1, int(rig.fps / 5)) == 0 or (conflict and not st.get("grip_diag_conflict", False)):
+                print(f"[AK_GRIP] phase={st['ph']} L={left:.3f} R={right:.3f} "
+                      f"min={low:.3f} max={high:.3f} mean={F:.3f} band={band} "
+                      f"trim_mm={st['trim']/MM:.3f} stable_frames={st['grip_stable_frames']} "
+                      f"lift_preload={st['lift_preload']} conflict={conflict}", flush=True)
+            st["grip_diag_conflict"] = conflict
+        if GS.GS_ON:
+            gap = 0.2 * MM if in_hand and mode == "tighten" and band == (10.0, 12.0) else GS_MIN_FACE_GAP
+            if in_hand and mode == "tighten" and band == (10.0, 12.0):
+                seat_gap = float(os.environ.get("AK_GS_SEAT_GAP_MM", "0.2"))
+                if not 0.0 <= seat_gap <= 0.2:
+                    raise ValueError("AK_GS_SEAT_GAP_MM must be in [0.0, 0.2]")
+                gap = seat_gap * MM
+            floor = PAD_FACE_OFF + GS.finger_offset() + 0.5 * gap
+            st["trim"] = max(st["trim"], floor - F_CLOSE_DOF)
         return F_CLOSE_DOF + st["trim"]
 
     def end_stroke(t, q):
@@ -1172,6 +1218,33 @@ def run(mode: str):
         head = Z0 + HEAD_TOP_Z + zsc            # MEASURED head top / recess floor
         floor = Z0 + RECESS_FLOOR_Z + zsc
         ph = st["ph"]
+        if GS.GS_ON and ph in HELD and ph != "hold":
+            lift = float((TK[:3, :3] @ h["key_raw"].center_mass + TK[:3, 3])[2]) - key_com_z0
+            relative = np.linalg.inv(Tt) @ TK
+            ref = st["grasp_ref"]
+            slip = float(np.linalg.norm(relative[:3, 3] - ref[:3, 3])) if ref is not None else 0.0
+            if in_hand:
+                G_now = np.linalg.inv(TK) @ Tt
+                # TCP projection along the straight leg must remain on its
+                # analytic collision segment; never reset the geometric guard.
+                # Measure translation at the TCP in tool coordinates, not
+                # at the remote tool origin rotating around the pinch.
+                G_ref = np.linalg.inv(ref)
+                slip = float(np.linalg.norm(G_now[:3, 3] - G_ref[:3, 3]))
+                pinch_x = float(G_now[0, 3])
+                if not KEY_BOX_X0 <= pinch_x <= KEY_TIP_CROP_X:
+                    raise _GraspFailure(f"tool outside straight-leg grasp range: {pinch_x/MM:.2f} mm")
+                cumulative = float(np.linalg.norm(G_now[:3, 3] - np.linalg.inv(st["initial_grasp_ref"])[:3, 3]))
+                st["max_cumulative_slip_mm"] = max(st.get("max_cumulative_slip_mm", 0.0), cumulative/MM)
+            if slip > 0.010:
+                raise _GraspFailure(f"tool slipped relative to TCP in {ph}: {slip/MM:.2f} mm")
+            if ph == "lifthold" and lift < 0.050:
+                raise _GraspFailure(f"actual tool lift insufficient: {lift/MM:.2f} mm")
+            if ph not in ("lift", "lower"):
+                lost = min(last("padL"), last("padR")) < GS_LIFT_LOST_FORCE_N
+                st["grip_lost_frames"] = st["grip_lost_frames"] + 1 if lost else 0
+                if st["grip_lost_frames"] >= max(1, int(round(0.1 * rig.fps))):
+                    raise _GraspFailure(f"key-specific bilateral contact lost in {ph}")
         s5 = HP.smooth5
         f_cmd = st["f"]
         p, R = st["p"], st["R"]
@@ -1210,7 +1283,13 @@ def run(mode: str):
                     st["lift_preload"] = True
                     st["grip_stable_frames"] = 0
                 elif st["lift_preload"] and stable_s >= GS_LIFT_PRELOAD_S:
-                    go("lift", t)
+                    st["grasp_ref"] = np.linalg.inv(Tt) @ TK
+                    if in_hand:
+                        st["initial_grasp_ref"] = st["grasp_ref"].copy()
+                        st["G"] = np.linalg.inv(TK) @ Tt
+                        go("hover", t)
+                    else:
+                        go("lift", t)
                 elif t - st["t0"] >= GS_HOLD_MAX_S:
                     raise _GraspFailure(
                         f"bilateral GelSight grip did not remain above "
@@ -1251,7 +1330,15 @@ def run(mode: str):
             p = st["from_p"] + (p_t - st["from_p"]) * u
             R = slerpR(st["from_R"], R_t, u)
             if t - st["t0"] >= T["carry"]:
-                go("tilt", t)
+                if not GS.GS_ON:
+                    go("tilt", t)
+                else:
+                    ready = min(last("padL"), last("padR")) >= GS_FREE_GRIP_BAND[0] and max(last("padL"), last("padR")) <= GS_FREE_GRIP_BAND[1]
+                    st["carry_ready_frames"] = st.get("carry_ready_frames", 0) + 1 if ready else 0
+                    if st["carry_ready_frames"] >= max(1, int(round(0.3 * rig.fps))):
+                        go("tilt", t)
+                    elif t - st["t0"] >= T["carry"] + 5.0:
+                        raise _GraspFailure("working grip not established before tilt")
         elif ph == "tilt":
             T_h = key_drive_pose(st["psi_start"], head + HOVER_DZ)
             _, R_h = tcp_for_key(T_h)
@@ -1313,7 +1400,15 @@ def run(mode: str):
             # vertical press servo on the measured key -> screw force; the
             # floor it is bounded against follows the head down its thread
             fz = last_vec("key_screw")[2]
-            press_servo(fz)
+            seat_press = PRESS_N
+            if in_hand and GS.GS_ON and mode == "tighten" and st["seated"]:
+                seat_press = float(os.environ.get("AK_GS_SEAT_PRESS_N", "0.5"))
+                if not 0.5 <= seat_press <= 1.5:
+                    raise ValueError("AK_GS_SEAT_PRESS_N must be in [0.5, 1.5]")
+            press_servo(fz, seat_press)
+            if in_hand and GS.GS_ON and mode == "tighten" and st["seated"] and int(round(t * rig.fps)) % 20 == 0:
+                saturated = any(abs(st["press"] - lim) < 1e-9 for lim in PRESS_LIM)
+                print(f"[AK_SEAT_PRESS] target={seat_press:.2f}N actual={fz:.2f}N pads={last('padL'):.2f}/{last('padR'):.2f}N torque={drive_tau()*1000:.2f}mNm press_mm={st['press']/MM:.3f} saturated={saturated}", flush=True)
             sub = st["turn_sub"]
             tau_now = drive_tau()
             st["tau_pk"] = max(st["tau_pk"], tau_now)
@@ -1325,8 +1420,15 @@ def run(mode: str):
                     st["turn_sub"], st["t_sub"] = "dwell", t
             elif sub == "ot":
                 # torque up: creep on until the recess carries TAU_TIGHT
-                st["psi"] = st["psi"] + dpsi * OT_RATE / rig.fps
-                if tau_now >= TAU_TIGHT or abs(np.degrees(st["psi"] - st["psi_seat"])) >= OT_MAX_DEG:
+                rate = OT_RATE * 0.5 if in_hand and GS.GS_ON else OT_RATE
+                elapsed = t - st["t_seat"]
+                if not (in_hand and GS.GS_ON) or min(last("padL"), last("padR")) >= 6.0:
+                    st["psi"] = st["psi"] + dpsi * rate / rig.fps
+                timed_out = in_hand and GS.GS_ON and elapsed >= 10.0
+                if timed_out:
+                    print(f"[AK_SEAT_TIMEOUT] torque={tau_now*1000:.2f} mNm; ending torque attempt", flush=True)
+                ot_limit = 35.0 if in_hand and GS.GS_ON else OT_MAX_DEG
+                if timed_out or tau_now >= TAU_TIGHT or abs(np.degrees(st["psi"] - st["psi_seat"])) >= ot_limit:
                     print(f"   torqued up: {tau_now * 1000:.1f} mN.m after "
                           f"{abs(np.degrees(st['psi'] - st['psi_seat'])):.1f} deg of over-travel")
                     st["ot_deg"] = round(abs(float(np.degrees(st["psi"] - st["psi_seat"]))), 1)
@@ -1452,6 +1554,10 @@ def run(mode: str):
             R = slerpR(st["from_R"], R_t, s5(frac(t)))
             p = st["from_p"]
             if t - st["t0"] >= T["untilt"]:
+                if in_hand and GS.GS_ON:
+                    st["G_acc"] = [np.linalg.inv(TK) @ Tt]
+                    regrasp_commit()
+                    st["corr"] = np.zeros(3)
                 go("carryback", t)
         elif ph == "carryback":
             T_pl = T_K0 @ st["G"]
@@ -1470,6 +1576,9 @@ def run(mode: str):
             v = 0.015 if low > 3.0 * MM else 0.003
             p = st["p"] - np.array([0.0, 0.0, v / rig.fps])
             R = (T_K0 @ st["G"])[:3, :3]
+            if in_hand and GS.GS_ON and low > 3.0 * MM:
+                err_xy = T_K0[:2, 3] - TK[:2, 3]
+                p[:2] += np.clip(0.15 * err_xy, -0.0005, 0.0005)
             if low <= 0.3 * MM or last_vec("key_table")[2] > 0.5 * weight \
                     or t - st["t0"] > T_PLACE_MAX:
                 st["place_low_mm"] = round(low / MM, 3)
@@ -1627,28 +1736,56 @@ def verdict(rig, mode, name, paths, log, st, h, weight, q0):
         return (t >= a) & (t <= b_)
 
     crit = {}
+    required = {"hover", "open", "lower", "up", "still", "probe"}
+    if not h["in_hand"]:
+        required.update(("descend", "lift", "tilt"))
+    missing = sorted(required - set(ts))
+    if missing or t_end < ts.get("probe", t_end) + 2 * T["probe"] - 2 / rig.fps:
+        crit["complete_trajectory"] = {
+            "pass": False, "missing_phases": missing, "last_phase": st["ph"],
+            "duration_s": t_end, "final_screw_deg": float(q_deg[-1]),
+            "final_screw_rise_mm": float(z_mm[-1]),
+            "peak_drive_torque_mNm": float(np.abs(L["tau"]).max() * 1000),
+            "reason": "incomplete phase sequence or probe duration"}
+        qa.report["checks"].update(crit)
+        qa.report["pass"] = False
+        report = rig.finish(qa)
+        return save_appendix_verdict(rig, task=TITLE[mode],
+                                     source="Allen key incomplete trajectory",
+                                     spec=SPEC[mode], criteria=crit, physics_qa=report,
+                                     changes=["Incomplete rollout; not a successful demonstration"])
     # ── picked up from the table by a fingertip pinch ───────────────────
-    rest0 = win(0.2, ts["descend"])
-    lift_w = win(ts["lift"], ts["tilt"])
-    held = win(ts["lift"] + 0.3, ts["open"])
-    both = float(((L["padL"][held] > 0.5) & (L["padR"][held] > 0.5)).mean())
-    rise = float((L["com_z"][lift_w].max() - L["com_z"][0]) / MM)
-    tab_air = float(L["table"][win(ts["lift"] + 0.5, ts["lower"])].max())
-    crit["picked_up_from_table"] = {
-        "pass": bool(abs(L["table_fz"][rest0].mean() - weight) < 0.3 * weight and rise > 50.0
-                     and both > 0.98 and tab_air < 0.01),
-        "table_support_at_start_N": round(float(L["table_fz"][rest0].mean()), 4),
-        "key_weight_N": round(weight, 4),
-        "lift_mm": round(rise, 1),
-        "both_pads_loaded_fraction_while_held": round(both, 3),
-        "pad_force_mean_while_held_N": [round(float(L["padL"][held].mean()), 2),
-                                        round(float(L["padR"][held].mean()), 2)],
-        "pad_force_min_while_held_N": [round(float(L["padL"][held].min()), 2),
-                                       round(float(L["padR"][held].min()), 2)],
-        "table_contact_in_air_max_N": round(tab_air, 4),
-        "note": "lying flat on the table at t=0; a top-down pinch across the long leg's "
-                "5 mm width; no joint, weld or kinematic attachment exists between the "
-                "robot and the key"}
+    if h["in_hand"]:
+        held = win(ts["hover"], ts["open"])
+        both = float(((L["padL"][held] > 0.5) & (L["padR"][held] > 0.5)).mean())
+        tab_air = float(L["table"][win(ts["hover"], ts["lower"])].max())
+        crit["initially_held_tool"] = {
+            "pass": bool(both > 0.98 and tab_air < 0.01),
+            "both_pads_loaded_fraction_while_held": both,
+            "table_contact_in_air_max_N": tab_air,
+            "note": "free rigid tool initialized between pads; no attachment"}
+    else:
+        rest0 = win(0.2, ts["descend"])
+        lift_w = win(ts["lift"], ts["tilt"])
+        held = win(ts["lift"] + 0.3, ts["open"])
+        both = float(((L["padL"][held] > 0.5) & (L["padR"][held] > 0.5)).mean())
+        rise = float((L["com_z"][lift_w].max() - L["com_z"][0]) / MM)
+        tab_air = float(L["table"][win(ts["lift"] + 0.5, ts["lower"])].max())
+        crit["picked_up_from_table"] = {
+            "pass": bool(abs(L["table_fz"][rest0].mean() - weight) < 0.3 * weight and rise > 50.0
+                         and both > 0.98 and tab_air < 0.01),
+            "table_support_at_start_N": round(float(L["table_fz"][rest0].mean()), 4),
+            "key_weight_N": round(weight, 4),
+            "lift_mm": round(rise, 1),
+            "both_pads_loaded_fraction_while_held": round(both, 3),
+            "pad_force_mean_while_held_N": [round(float(L["padL"][held].mean()), 2),
+                                            round(float(L["padR"][held].mean()), 2)],
+            "pad_force_min_while_held_N": [round(float(L["padL"][held].min()), 2),
+                                           round(float(L["padR"][held].min()), 2)],
+            "table_contact_in_air_max_N": round(tab_air, 4),
+            "note": "lying flat on the table at t=0; a top-down pinch across the long leg's "
+                    "5 mm width; no joint, weld or kinematic attachment exists between the "
+                    "robot and the key"}
 
     # ── the screw ───────────────────────────────────────────────────────
     t_probe = ts.get("probe", t_end)
@@ -1786,7 +1923,7 @@ def verdict(rig, mode, name, paths, log, st, h, weight, q0):
 
     # ── put back on the table ───────────────────────────────────────────
     fin = win(ts.get("still", t_end), t_end)
-    p0 = np.array([L["key_x"][0], L["key_y"][0]])
+    p0 = h["T_K0"][:2, 3] if h["in_hand"] else np.array([L["key_x"][0], L["key_y"][0]])
     pf = np.array([L["key_x"][fin][-1], L["key_y"][fin][-1]])
     disp = float(np.linalg.norm(pf - p0) / MM)
     comv = float(np.abs(np.diff(L["com_z"][fin])).max() * rig.fps / MM) if fin.sum() > 1 else 0.0
@@ -1840,10 +1977,10 @@ def verdict(rig, mode, name, paths, log, st, h, weight, q0):
     # in-hand twist of the key about its own leg: K_y seen from link7,
     # relative to the pose measured at lifthold
     k7 = np.c_[L["ky7x"], L["ky7y"], L["ky7z"]]
-    i_ref = int(np.searchsorted(t, ts["carry"]))
+    i_ref = int(np.searchsorted(t, ts.get("carry", ts.get("hover", 0.0))))
     ref = k7[i_ref] / np.linalg.norm(k7[i_ref])
     tw = np.degrees(np.arccos(np.clip(k7 @ ref / np.linalg.norm(k7, axis=1), -1.0, 1.0)))
-    held_m = np.isin(ph_names, list(HELD)) & (t >= ts["carry"])
+    held_m = np.isin(ph_names, list(HELD)) & (t >= ts.get("carry", ts.get("hover", 0.0)))
     spikes = {}
     for k in ("padL", "padR"):
         dev = L[k][1:-1] - 0.5 * (L[k][:-2] + L[k][2:])
@@ -1864,6 +2001,7 @@ def verdict(rig, mode, name, paths, log, st, h, weight, q0):
         "in_hand_tcp_in_key_frame_mm": np.round(st["G"][:3, 3] / MM, 2).tolist(),
         "in_hand_pose_log_mm": st["G_log"],
         "grip_trim_final_mm": round(st["trim"] / MM, 3),
+        "max_cumulative_slip_mm": st.get("max_cumulative_slip_mm"),
         "pad_force_single_frame_jumps_over_1N": spikes,
         "phase_start_s": {k: round(float(v), 2) for k, v in ts.items()}}
 
@@ -1909,8 +2047,8 @@ def verdict(rig, mode, name, paths, log, st, h, weight, q0):
     qa.report["pass"] = all(c.get("pass", True) for c in qa.report["checks"].values())
     report = rig.finish(qa)
     changes = [
-        "starts with the Allen key lying flat on the table (appendix: in hand); picked up "
-        "by a top-down pinch across the long leg, put back where it was at the end",
+        ("starts with a free Allen key between the pads in operating pose; returns to table" if h["in_hand"] else
+         "starts with the Allen key lying flat on the table; picked up by a top-down pinch and returned"),
         "kit parts (assets/bodies_kit/allen_key, screw_block); no sim Allen-key task existed",
         "the long leg drives the screw: the key is tilted 90 deg in free air by the hand "
         "(horizontal hand), and the hand ORBITS the screw axis to turn it; strokes of "

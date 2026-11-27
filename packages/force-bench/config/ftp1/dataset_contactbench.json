@@ -1,0 +1,11 @@
+{
+  "datasets": [
+    {
+      "name": "ContactBench_retrieve_card_from_deck",
+      "path": "outputs/datasets/ftp1/contactbench_retrieve_card.zarr",
+      "use_trajectory_ratio": 1.0
+    }
+  ],
+  "default_use_trajectory_ratio": 1.0,
+  "description": "FTP-1 official raw-Zarr contract: right wrist RGB, world-frame right_wrist_pose, one absolute gripper channel mapped to canonical slot 28, and two GelSightMini Taxim RGB areas."
+}

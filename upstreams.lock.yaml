@@ -14,5 +14,5 @@ upstreams:
     path: third_party/openpi
   ftp1_policy:
     repository: https://github.com/michaelyuancb/ftp1-policy.git
-    commit: 89fa681
+    commit: 89fa681d6c014cce28300946b7526db808e0b1c1
     path: third_party/ftp1-policy
