@@ -1166,7 +1166,7 @@ def run(mode: str):
                 (GS_PICK_GRIP_BAND if GS.GS_ON and st["ph"] == "hold"
                  else (GS_WORK_GRIP_BAND if st["ph"] in ("insert", "reinsert", "turn", "seat_hold", "extract") else GS_FREE_GRIP_BAND) if GS.GS_ON else GRIP_BAND))
         if in_hand and GS.GS_ON and mode == "tighten" and st["ph"] in ("reinsert", "turn", "seat_hold") and (st["seated"] or np.degrees(screw_qz()[0]) >= -10.0):
-            band = (8.0, 10.0)
+            band = (10.0, 12.0)
         trim_step = GS_GRIP_TRIM_STEP if GS.GS_ON and st["ph"] in ("hold", "lift", "lifthold") else GRIP_TRIM_STEP
         trim_max = GS_GRIP_TRIM_MAX if GS.GS_ON else GRIP_TRIM_MAX
         bilateral_control = GS.GS_ON and st["ph"] in HELD
@@ -1187,7 +1187,7 @@ def run(mode: str):
                       f"lift_preload={st['lift_preload']} conflict={conflict}", flush=True)
             st["grip_diag_conflict"] = conflict
         if GS.GS_ON:
-            gap = 0.5 * MM if in_hand and mode == "tighten" and band == (8.0, 10.0) else GS_MIN_FACE_GAP
+            gap = 0.2 * MM if in_hand and mode == "tighten" and band == (10.0, 12.0) else GS_MIN_FACE_GAP
             floor = PAD_FACE_OFF + GS.finger_offset() + 0.5 * gap
             st["trim"] = max(st["trim"], floor - F_CLOSE_DOF)
         return F_CLOSE_DOF + st["trim"]
@@ -1411,10 +1411,11 @@ def run(mode: str):
                 elapsed = t - st["t_seat"]
                 if not (in_hand and GS.GS_ON) or min(last("padL"), last("padR")) >= 6.0:
                     st["psi"] = st["psi"] + dpsi * rate / rig.fps
-                timed_out = in_hand and GS.GS_ON and elapsed >= 8.0
+                timed_out = in_hand and GS.GS_ON and elapsed >= 10.0
                 if timed_out:
                     print(f"[AK_SEAT_TIMEOUT] torque={tau_now*1000:.2f} mNm; ending torque attempt", flush=True)
-                if timed_out or tau_now >= TAU_TIGHT or abs(np.degrees(st["psi"] - st["psi_seat"])) >= OT_MAX_DEG:
+                ot_limit = 35.0 if in_hand and GS.GS_ON else OT_MAX_DEG
+                if timed_out or tau_now >= TAU_TIGHT or abs(np.degrees(st["psi"] - st["psi_seat"])) >= ot_limit:
                     print(f"   torqued up: {tau_now * 1000:.1f} mN.m after "
                           f"{abs(np.degrees(st['psi'] - st['psi_seat'])):.1f} deg of over-travel")
                     st["ot_deg"] = round(abs(float(np.degrees(st["psi"] - st["psi_seat"]))), 1)
@@ -1909,7 +1910,7 @@ def verdict(rig, mode, name, paths, log, st, h, weight, q0):
 
     # ── put back on the table ───────────────────────────────────────────
     fin = win(ts.get("still", t_end), t_end)
-    p0 = (h["T_K0"] @ np.r_[h["c_K"], 1.0])[:2] if h["in_hand"] else np.array([L["key_x"][0], L["key_y"][0]])
+    p0 = h["T_K0"][:2, 3] if h["in_hand"] else np.array([L["key_x"][0], L["key_y"][0]])
     pf = np.array([L["key_x"][fin][-1], L["key_y"][fin][-1]])
     disp = float(np.linalg.norm(pf - p0) / MM)
     comv = float(np.abs(np.diff(L["com_z"][fin])).max() * rig.fps / MM) if fin.sum() > 1 else 0.0
