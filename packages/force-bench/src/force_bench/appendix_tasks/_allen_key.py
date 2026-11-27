@@ -1188,10 +1188,6 @@ def run(mode: str):
             st["grip_diag_conflict"] = conflict
         if GS.GS_ON:
             gap = 0.2 * MM if in_hand and mode == "tighten" and band == (10.0, 12.0) else GS_MIN_FACE_GAP
-            if in_hand and st["ph"] == "hold" and st["lift_preload"] and os.environ.get("AK_GS_INITIAL_PRELOAD_GAP_MM") is not None:
-                gap = float(os.environ["AK_GS_INITIAL_PRELOAD_GAP_MM"]) * MM
-                if not 0.2 * MM <= gap <= GS_MIN_FACE_GAP:
-                    raise ValueError("AK_GS_INITIAL_PRELOAD_GAP_MM outside bounded range")
             floor = PAD_FACE_OFF + GS.finger_offset() + 0.5 * gap
             st["trim"] = max(st["trim"], floor - F_CLOSE_DOF)
         return F_CLOSE_DOF + st["trim"]
@@ -1399,7 +1395,15 @@ def run(mode: str):
             # vertical press servo on the measured key -> screw force; the
             # floor it is bounded against follows the head down its thread
             fz = last_vec("key_screw")[2]
-            press_servo(fz)
+            seat_press = PRESS_N
+            if in_hand and GS.GS_ON and mode == "tighten" and st["seated"]:
+                seat_press = float(os.environ.get("AK_GS_SEAT_PRESS_N", "0.5"))
+                if not 0.5 <= seat_press <= 1.5:
+                    raise ValueError("AK_GS_SEAT_PRESS_N must be in [0.5, 1.5]")
+            press_servo(fz, seat_press)
+            if in_hand and GS.GS_ON and mode == "tighten" and st["seated"] and int(round(t * rig.fps)) % 20 == 0:
+                saturated = any(abs(st["press"] - lim) < 1e-9 for lim in PRESS_LIM)
+                print(f"[AK_SEAT_PRESS] target={seat_press:.2f}N actual={fz:.2f}N pads={last('padL'):.2f}/{last('padR'):.2f}N torque={drive_tau()*1000:.2f}mNm press_mm={st['press']/MM:.3f} saturated={saturated}", flush=True)
             sub = st["turn_sub"]
             tau_now = drive_tau()
             st["tau_pk"] = max(st["tau_pk"], tau_now)
