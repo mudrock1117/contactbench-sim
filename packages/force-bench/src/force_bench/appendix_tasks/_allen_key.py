@@ -1135,6 +1135,12 @@ def run(mode: str):
         # a slip of the key in the pinch is now in G itself, so the vertical
         # correction learned against the old G is dropped (re-learned in the
         # next insertion); the xy correction is re-learned by the end loop
+        if in_hand and GS.GS_ON:
+            spread = max(float(np.linalg.norm(g[:3, 3] - Gn[:3, 3])) for g in acc)
+            if min(last("padL"), last("padR")) < 2.5 or last("kscrew") > 0.1 or spread > 1.0 * MM:
+                raise _GraspFailure("unstable free-tool pose during regrasp measurement")
+            st["grasp_ref"] = np.linalg.inv(Gn)
+            print(f"[AK_REGRASP] stable reference updated; spread_mm={spread/MM:.3f}", flush=True)
         st["G"] = Gn
         st["corr"][2] = 0.0
         st["G_log"].append(np.round(Gn[:3, 3] / MM, 2).tolist())
@@ -1159,6 +1165,8 @@ def run(mode: str):
         band = (GS_LIFT_GRIP_BAND if lift_grip else
                 (GS_PICK_GRIP_BAND if GS.GS_ON and st["ph"] == "hold"
                  else (GS_WORK_GRIP_BAND if st["ph"] in ("insert", "reinsert", "turn", "seat_hold", "extract") else GS_FREE_GRIP_BAND) if GS.GS_ON else GRIP_BAND))
+        if in_hand and GS.GS_ON and st["seated"] and st["ph"] in ("turn", "seat_hold"):
+            band = (6.0, 8.0)
         trim_step = GS_GRIP_TRIM_STEP if GS.GS_ON and st["ph"] in ("hold", "lift", "lifthold") else GRIP_TRIM_STEP
         trim_max = GS_GRIP_TRIM_MAX if GS.GS_ON else GRIP_TRIM_MAX
         bilateral_control = GS.GS_ON and st["ph"] in HELD
@@ -1209,6 +1217,15 @@ def run(mode: str):
             relative = np.linalg.inv(Tt) @ TK
             ref = st["grasp_ref"]
             slip = float(np.linalg.norm(relative[:3, 3] - ref[:3, 3])) if ref is not None else 0.0
+            if in_hand:
+                G_now = np.linalg.inv(TK) @ Tt
+                # TCP projection along the straight leg must remain on its
+                # analytic collision segment; never reset the geometric guard.
+                pinch_x = float(G_now[0, 3])
+                if not KEY_BOX_X0 <= pinch_x <= KEY_TIP_CROP_X:
+                    raise _GraspFailure(f"tool outside straight-leg grasp range: {pinch_x/MM:.2f} mm")
+                cumulative = float(np.linalg.norm(relative[:3, 3] - st["initial_grasp_ref"][:3, 3]))
+                st["max_cumulative_slip_mm"] = max(st.get("max_cumulative_slip_mm", 0.0), cumulative/MM)
             if slip > 0.010:
                 raise _GraspFailure(f"tool slipped relative to TCP in {ph}: {slip/MM:.2f} mm")
             if ph == "lifthold" and lift < 0.050:
@@ -1258,6 +1275,7 @@ def run(mode: str):
                 elif st["lift_preload"] and stable_s >= GS_LIFT_PRELOAD_S:
                     st["grasp_ref"] = np.linalg.inv(Tt) @ TK
                     if in_hand:
+                        st["initial_grasp_ref"] = st["grasp_ref"].copy()
                         st["G"] = np.linalg.inv(TK) @ Tt
                         go("hover", t)
                     else:
@@ -1933,6 +1951,7 @@ def verdict(rig, mode, name, paths, log, st, h, weight, q0):
         "in_hand_tcp_in_key_frame_mm": np.round(st["G"][:3, 3] / MM, 2).tolist(),
         "in_hand_pose_log_mm": st["G_log"],
         "grip_trim_final_mm": round(st["trim"] / MM, 3),
+        "max_cumulative_slip_mm": st.get("max_cumulative_slip_mm"),
         "pad_force_single_frame_jumps_over_1N": spikes,
         "phase_start_s": {k: round(float(v), 2) for k, v in ts.items()}}
 
