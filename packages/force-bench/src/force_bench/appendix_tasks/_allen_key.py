@@ -1165,8 +1165,8 @@ def run(mode: str):
         band = (GS_LIFT_GRIP_BAND if lift_grip else
                 (GS_PICK_GRIP_BAND if GS.GS_ON and st["ph"] == "hold"
                  else (GS_WORK_GRIP_BAND if st["ph"] in ("insert", "reinsert", "turn", "seat_hold", "extract") else GS_FREE_GRIP_BAND) if GS.GS_ON else GRIP_BAND))
-        if in_hand and GS.GS_ON and st["seated"] and st["ph"] in ("turn", "seat_hold"):
-            band = (6.0, 8.0)
+        if in_hand and GS.GS_ON and mode == "tighten" and st["ph"] in ("reinsert", "turn", "seat_hold") and (st["seated"] or np.degrees(screw_qz()[0]) >= -10.0):
+            band = (8.0, 10.0)
         trim_step = GS_GRIP_TRIM_STEP if GS.GS_ON and st["ph"] in ("hold", "lift", "lifthold") else GRIP_TRIM_STEP
         trim_max = GS_GRIP_TRIM_MAX if GS.GS_ON else GRIP_TRIM_MAX
         bilateral_control = GS.GS_ON and st["ph"] in HELD
@@ -1221,10 +1221,14 @@ def run(mode: str):
                 G_now = np.linalg.inv(TK) @ Tt
                 # TCP projection along the straight leg must remain on its
                 # analytic collision segment; never reset the geometric guard.
+                # Measure translation at the TCP in tool coordinates, not
+                # at the remote tool origin rotating around the pinch.
+                G_ref = np.linalg.inv(ref)
+                slip = float(np.linalg.norm(G_now[:3, 3] - G_ref[:3, 3]))
                 pinch_x = float(G_now[0, 3])
                 if not KEY_BOX_X0 <= pinch_x <= KEY_TIP_CROP_X:
                     raise _GraspFailure(f"tool outside straight-leg grasp range: {pinch_x/MM:.2f} mm")
-                cumulative = float(np.linalg.norm(relative[:3, 3] - st["initial_grasp_ref"][:3, 3]))
+                cumulative = float(np.linalg.norm(G_now[:3, 3] - np.linalg.inv(st["initial_grasp_ref"])[:3, 3]))
                 st["max_cumulative_slip_mm"] = max(st.get("max_cumulative_slip_mm", 0.0), cumulative/MM)
             if slip > 0.010:
                 raise _GraspFailure(f"tool slipped relative to TCP in {ph}: {slip/MM:.2f} mm")
@@ -1402,7 +1406,9 @@ def run(mode: str):
                     st["turn_sub"], st["t_sub"] = "dwell", t
             elif sub == "ot":
                 # torque up: creep on until the recess carries TAU_TIGHT
-                st["psi"] = st["psi"] + dpsi * OT_RATE / rig.fps
+                rate = OT_RATE * 0.5 if in_hand and GS.GS_ON else OT_RATE
+                if not (in_hand and GS.GS_ON) or min(last("padL"), last("padR")) >= 7.5:
+                    st["psi"] = st["psi"] + dpsi * rate / rig.fps
                 if tau_now >= TAU_TIGHT or abs(np.degrees(st["psi"] - st["psi_seat"])) >= OT_MAX_DEG:
                     print(f"   torqued up: {tau_now * 1000:.1f} mN.m after "
                           f"{abs(np.degrees(st['psi'] - st['psi_seat'])):.1f} deg of over-travel")
