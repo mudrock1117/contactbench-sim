@@ -1187,7 +1187,7 @@ def run(mode: str):
                       f"lift_preload={st['lift_preload']} conflict={conflict}", flush=True)
             st["grip_diag_conflict"] = conflict
         if GS.GS_ON:
-            gap = 0.2 * MM if in_hand and mode == "tighten" and band == (10.0, 12.0) else GS_MIN_FACE_GAP
+            gap = 0.0 * MM if in_hand and mode == "tighten" and band == (10.0, 12.0) else GS_MIN_FACE_GAP
             floor = PAD_FACE_OFF + GS.finger_offset() + 0.5 * gap
             st["trim"] = max(st["trim"], floor - F_CLOSE_DOF)
         return F_CLOSE_DOF + st["trim"]
@@ -1408,13 +1408,15 @@ def run(mode: str):
             elif sub == "ot":
                 # torque up: creep on until the recess carries TAU_TIGHT
                 rate = OT_RATE * 0.5 if in_hand and GS.GS_ON else OT_RATE
+                if in_hand and GS.GS_ON:
+                    rate *= 1.5 if tau_now < 0.020 else 0.75
                 elapsed = t - st["t_seat"]
-                if not (in_hand and GS.GS_ON) or min(last("padL"), last("padR")) >= 6.0:
+                if not (in_hand and GS.GS_ON) or min(last("padL"), last("padR")) >= 9.0:
                     st["psi"] = st["psi"] + dpsi * rate / rig.fps
                 timed_out = in_hand and GS.GS_ON and elapsed >= 10.0
                 if timed_out:
                     print(f"[AK_SEAT_TIMEOUT] torque={tau_now*1000:.2f} mNm; ending torque attempt", flush=True)
-                ot_limit = 35.0 if in_hand and GS.GS_ON else OT_MAX_DEG
+                ot_limit = 25.0 if in_hand and GS.GS_ON else OT_MAX_DEG
                 if timed_out or tau_now >= TAU_TIGHT or abs(np.degrees(st["psi"] - st["psi_seat"])) >= ot_limit:
                     print(f"   torqued up: {tau_now * 1000:.1f} mN.m after "
                           f"{abs(np.degrees(st['psi'] - st['psi_seat'])):.1f} deg of over-travel")
