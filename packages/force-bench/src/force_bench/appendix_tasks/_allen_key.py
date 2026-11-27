@@ -1188,6 +1188,11 @@ def run(mode: str):
             st["grip_diag_conflict"] = conflict
         if GS.GS_ON:
             gap = 0.2 * MM if in_hand and mode == "tighten" and band == (10.0, 12.0) else GS_MIN_FACE_GAP
+            if in_hand and mode == "tighten" and band == (10.0, 12.0):
+                seat_gap = float(os.environ.get("AK_GS_SEAT_GAP_MM", "0.2"))
+                if not 0.0 <= seat_gap <= 0.2:
+                    raise ValueError("AK_GS_SEAT_GAP_MM must be in [0.0, 0.2]")
+                gap = seat_gap * MM
             floor = PAD_FACE_OFF + GS.finger_offset() + 0.5 * gap
             st["trim"] = max(st["trim"], floor - F_CLOSE_DOF)
         return F_CLOSE_DOF + st["trim"]
