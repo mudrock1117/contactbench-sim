@@ -1188,6 +1188,10 @@ def run(mode: str):
             st["grip_diag_conflict"] = conflict
         if GS.GS_ON:
             gap = 0.2 * MM if in_hand and mode == "tighten" and band == (10.0, 12.0) else GS_MIN_FACE_GAP
+            if in_hand and st["ph"] == "hold" and st["lift_preload"] and os.environ.get("AK_GS_INITIAL_PRELOAD_GAP_MM") is not None:
+                gap = float(os.environ["AK_GS_INITIAL_PRELOAD_GAP_MM"]) * MM
+                if not 0.2 * MM <= gap <= GS_MIN_FACE_GAP:
+                    raise ValueError("AK_GS_INITIAL_PRELOAD_GAP_MM outside bounded range")
             floor = PAD_FACE_OFF + GS.finger_offset() + 0.5 * gap
             st["trim"] = max(st["trim"], floor - F_CLOSE_DOF)
         return F_CLOSE_DOF + st["trim"]
