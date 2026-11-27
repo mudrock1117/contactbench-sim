@@ -1540,6 +1540,10 @@ def run(mode: str):
             R = slerpR(st["from_R"], R_t, s5(frac(t)))
             p = st["from_p"]
             if t - st["t0"] >= T["untilt"]:
+                if in_hand and GS.GS_ON:
+                    st["G_acc"] = [np.linalg.inv(TK) @ Tt]
+                    regrasp_commit()
+                    st["corr"] = np.zeros(3)
                 go("carryback", t)
         elif ph == "carryback":
             T_pl = T_K0 @ st["G"]
@@ -1558,6 +1562,9 @@ def run(mode: str):
             v = 0.015 if low > 3.0 * MM else 0.003
             p = st["p"] - np.array([0.0, 0.0, v / rig.fps])
             R = (T_K0 @ st["G"])[:3, :3]
+            if in_hand and GS.GS_ON and low > 3.0 * MM:
+                err_xy = T_K0[:2, 3] - TK[:2, 3]
+                p[:2] += np.clip(0.15 * err_xy, -0.0005, 0.0005)
             if low <= 0.3 * MM or last_vec("key_table")[2] > 0.5 * weight \
                     or t - st["t0"] > T_PLACE_MAX:
                 st["place_low_mm"] = round(low / MM, 3)
