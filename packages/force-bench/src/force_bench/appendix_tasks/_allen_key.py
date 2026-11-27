@@ -1187,7 +1187,8 @@ def run(mode: str):
                       f"lift_preload={st['lift_preload']} conflict={conflict}", flush=True)
             st["grip_diag_conflict"] = conflict
         if GS.GS_ON:
-            floor = PAD_FACE_OFF + GS.finger_offset() + 0.5 * GS_MIN_FACE_GAP
+            gap = 0.5 * MM if in_hand and mode == "tighten" and band == (8.0, 10.0) else GS_MIN_FACE_GAP
+            floor = PAD_FACE_OFF + GS.finger_offset() + 0.5 * gap
             st["trim"] = max(st["trim"], floor - F_CLOSE_DOF)
         return F_CLOSE_DOF + st["trim"]
 
@@ -1407,9 +1408,13 @@ def run(mode: str):
             elif sub == "ot":
                 # torque up: creep on until the recess carries TAU_TIGHT
                 rate = OT_RATE * 0.5 if in_hand and GS.GS_ON else OT_RATE
-                if not (in_hand and GS.GS_ON) or min(last("padL"), last("padR")) >= 7.5:
+                elapsed = t - st["t_seat"]
+                if not (in_hand and GS.GS_ON) or min(last("padL"), last("padR")) >= 6.0:
                     st["psi"] = st["psi"] + dpsi * rate / rig.fps
-                if tau_now >= TAU_TIGHT or abs(np.degrees(st["psi"] - st["psi_seat"])) >= OT_MAX_DEG:
+                timed_out = in_hand and GS.GS_ON and elapsed >= 8.0
+                if timed_out:
+                    print(f"[AK_SEAT_TIMEOUT] torque={tau_now*1000:.2f} mNm; ending torque attempt", flush=True)
+                if timed_out or tau_now >= TAU_TIGHT or abs(np.degrees(st["psi"] - st["psi_seat"])) >= OT_MAX_DEG:
                     print(f"   torqued up: {tau_now * 1000:.1f} mN.m after "
                           f"{abs(np.degrees(st['psi'] - st['psi_seat'])):.1f} deg of over-travel")
                     st["ot_deg"] = round(abs(float(np.degrees(st["psi"] - st["psi_seat"]))), 1)
@@ -1710,6 +1715,24 @@ def verdict(rig, mode, name, paths, log, st, h, weight, q0):
         return (t >= a) & (t <= b_)
 
     crit = {}
+    required = {"hover", "open", "lower", "up", "still", "probe"}
+    if not h["in_hand"]:
+        required.update(("descend", "lift", "tilt"))
+    missing = sorted(required - set(ts))
+    if missing or t_end < ts.get("probe", t_end) + 2 * T["probe"] - 2 / rig.fps:
+        crit["complete_trajectory"] = {
+            "pass": False, "missing_phases": missing, "last_phase": st["ph"],
+            "duration_s": t_end, "final_screw_deg": float(q_deg[-1]),
+            "final_screw_rise_mm": float(z_mm[-1]),
+            "peak_drive_torque_mNm": float(np.abs(L["tau"]).max() * 1000),
+            "reason": "incomplete phase sequence or probe duration"}
+        qa.report["checks"].update(crit)
+        qa.report["pass"] = False
+        report = rig.finish(qa)
+        return save_appendix_verdict(rig, task=TITLE[mode],
+                                     source="Allen key incomplete trajectory",
+                                     spec=SPEC[mode], criteria=crit, physics_qa=report,
+                                     changes=["Incomplete rollout; not a successful demonstration"])
     # ── picked up from the table by a fingertip pinch ───────────────────
     if h["in_hand"]:
         held = win(ts["hover"], ts["open"])
